@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git remote:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ssh-add:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(pip show:*)",
+      "Bash(source:*)",
+      "Bash(curl:*)",
+      "Bash(grep:*)",
+      "Bash(pgrep:*)",
+      "Bash(ls:*)",
+      "Bash(ruff check:*)",
+      "Bash(ruff format:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/tothomas/Coding/spellforge/.claude/hooks/post_edit.sh",
+            "statusMessage": "\ud83d\udd0d Ruff checking for lint..."
+          }
+        ]
+      }
+    ]
+  }
+}
