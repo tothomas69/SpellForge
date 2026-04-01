@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="images/spellforge_readme.png" width="200" alt="Spellforge Logo">
+  <img src="images/spellforge_readme.png" width="200" alt="SpellForge Logo">
 </p>
 
-# 🪄 Spellforge
+# 🪄 SpellForge
 
-> *Because setting up a Python project from scratch is a curse. Spellforge breaks it.*
+> *Because setting up a Python project from scratch is a curse. SpellForge breaks it.*
 
-Spellforge is a Claude-powered Python project bootstrapper that conjures fully configured, production-ready Python projects from thin air — complete with colorful terminal output, fail-fast verification, and your personal coding standards baked right in.
+SpellForge is a Claude-powered Python project bootstrapper that conjures fully configured, production-ready Python projects from thin air — complete with colorful terminal output, fail-fast verification and your personal coding standards baked right in.
 
 No more copy-pasting boilerplate. No more forgetting to set up your `.gitignore`. No more "wait, did I configure the venv?" Just run the spell and get to building.
 
 ---
 
-## ✨ What Spellforge Sets Up
+## ✨ What SpellForge Sets Up
 
-Spellforge walks you through an interactive menu, then installs and configures everything automatically. Here's exactly what you get:
+SpellForge walks you through an interactive menu, then installs and configures everything automatically. Here's exactly what you get:
 
 ### 🔒 Required (always installed)
 
@@ -42,7 +42,7 @@ Spellforge walks you through an interactive menu, then installs and configures e
 | **Prettier** | Frontend formatter | Enforces consistent formatting across JS, TS, HTML, CSS, JSON, YAML, and Markdown |
 | **Watchdog** | Filesystem monitor | Watches for file changes in real time — great for auto-reloading scripts or triggering pipelines on data drops |
 
-### 🎨 Spellforge itself
+### 🎨 SpellForge itself
 
 - **Colorful terminal output** — progress is clear, errors are obvious, nothing is a wall of grey text
 - **Fail-fast verification** — every step is verified before moving on so problems surface immediately
@@ -53,9 +53,7 @@ Spellforge walks you through an interactive menu, then installs and configures e
 
 ## 🖼️ Demo
 
-> 📸 *Screenshots coming soon — add your terminal recordings here!*
-
-You can drop an animated GIF or screenshot of a Spellforge run here. Tools like [Terminalizer](https://github.com/faressoft/terminalizer) or [Asciinema](https://asciinema.org/) work great for this.
+> 📸 *Screenshots coming soon *
 
 ---
 
@@ -73,25 +71,17 @@ git clone https://github.com/tothomas69/spellforge.git
 cd spellforge
 ```
 
-### 2. Set up a virtual environment
-
-```bash
-python -m venv venv
-source venv/bin/activate        # macOS/Linux
-venv\Scripts\activate           # Windows
-```
-
-### 3. Install dependencies
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Get your API key ready
+### 3. Get your API key ready
 
-Spellforge will ask for your Anthropic API key during setup — no environment variables needed. Just have it ready to paste when prompted. You can get one from the [Anthropic Console](https://console.anthropic.com/).
+SpellForge will ask for your Anthropic API key during setup — no environment variables needed. Just have it ready to paste when prompted. You can get one from the [Anthropic Console](https://console.anthropic.com/).
 
-### 5. Run Spellforge
+### 4. Run SpellForge
 
 ```bash
 python spellforge.py
@@ -99,6 +89,14 @@ python spellforge.py
 
 Follow the prompts, describe your project, and watch the magic happen. ✨
 
+### 5. Verify the bootstrap
+
+After SpellForge runs, confirm everything was set up correctly by running the built-in verification suite:
+```bash
+pytest tests/ -v
+```
+
+All tests should be green. This suite checks that every tool was installed correctly, all config files are in place, and your Claude Code environment is properly configured.
 ---
 
 ## 🤝 Contributing
@@ -136,5 +134,3 @@ In short: do whatever you want with it. Just keep the copyright notice. 🙂
 ## 🙋 About
 
 Built by Tom as a tool to scratch his own itch — because every great project deserves a great start.
-
-*Powered by [Claude](https://www.anthropic.com) from Anthropic.*

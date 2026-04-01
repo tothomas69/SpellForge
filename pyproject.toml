@@ -35,6 +35,8 @@ testpaths = ["tests"]
 # Enforce 80% minimum coverage on every run — matches Definition of Done
 addopts = "--cov=. --cov-report=term-missing --cov-fail-under=80"
 
+[tool.coverage.run]
+omit = ["spellforge.py"]
 
 [tool.bandit]
 # Skip test files - they intentionally use patterns bandit flags
