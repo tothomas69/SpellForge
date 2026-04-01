@@ -17,7 +17,9 @@
       "Bash(ls:*)",
       "Bash(ruff check:*)",
       "Bash(ruff format:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(.venv/bin/ruff check:*)",
+      "Bash(.venv/bin/python3 -m pytest tests/ -v)"
     ]
   },
   "hooks": {
@@ -28,7 +30,7 @@
           {
             "type": "command",
             "command": "/Users/tothomas/Coding/spellforge/.claude/hooks/post_edit.sh",
-            "statusMessage": "\ud83d\udd0d Ruff checking for lint..."
+            "statusMessage": "🔍 Ruff checking for lint..."
           }
         ]
       }

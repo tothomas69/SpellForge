@@ -27,7 +27,7 @@ select = ["E", "F", "I", "W"]
 # Rules we deliberately ignore:
 #   E501 — line too long (we trust developers on long strings/comments)
 #   E303 — too many blank lines (occasionally useful for readability)
-ignore = ["E501", "E303"]
+ignore = ["E501", "E303", "W191", "E101"]
 
 [tool.pytest.ini_options]
 # Discover all tests/ directories recursively

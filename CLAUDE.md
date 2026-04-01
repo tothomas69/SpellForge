@@ -4,11 +4,7 @@ This file provides essential context for Claude Code when working on this projec
 ## Project Documentation
 The following files contain critical project information:
 - @docs/prd.md - Product Requirements Document with goals, features, and technical requirements
-- @docs/project-guide.md - Discovery guide for existing systems, components, and patterns. **Read this before implementing new functionality** to find what already exists.
-
-### Specialized Documentation
-The following documents should be read when working in specific areas:
-- `docs/as-built.md` - **Read this document when planning or implementing tools.** Defines architecture, validation requirements, error handling, description standards, and testing requirements for the tool system.
+- @docs/as-built-project-guide.md - Combined discovery and architecture guide. **Read this before implementing new functionality** to find what already exists.
 
 ## Development Environment
 **Platform**: macOS
@@ -21,16 +17,16 @@ Implementation is complete when:
 - Minimum 80% code coverage on every file touched in the commit
 - No formatter, linter, or type checker issues
 
-### Project Guide Maintenance
-**NEVER commit to git without first updating `docs/project-guide.md`** to reflect any changes:
+### As-Built Project Guide Maintenance
+**NEVER commit to git without first updating `docs/as-built-project-guide.md`** to reflect any changes:
 - New systems, modules, or components added
 - Systems removed or relocated
 - New execution contexts or API endpoints
 - New settings categories or key functions
 
-This is a **hard requirement**. If you added, removed, or modified any server systems, components, API endpoints, or settings, the project guide **MUST** be updated in the same commit.
-**Before updating the project guide**, read `docs/project-guide-instructions.md` for guidance on what to include and how to maintain consistency.
-The project guide is the primary discovery document for finding existing functionality. Keeping it current prevents duplicate implementations and helps integrate with existing patterns.
+This is a **hard requirement**. If you added, removed, or modified any server systems, components, API endpoints, or settings, the as-built project guide **MUST** be updated in the same commit.
+**Before updating the as-built project guide**, read the maintenance instructions at the top of `docs/as-built-project-guide.md` for guidance on what to include.
+The as-built project guide is the primary discovery document for finding existing functionality. Keeping it current prevents duplicate implementations and helps integrate with existing patterns.
 
 ## Coding Guidelines
 ### Code Style

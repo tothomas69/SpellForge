@@ -16,16 +16,30 @@ In one sentence: Spellforge eliminates new project setup so you can start writin
 
 ## Goals
 
-- [ ] Define primary goals here
+- Single-command Python project setup that takes a blank directory to a fully configured development environment
+- Consistent project foundations so every new project starts from the same solid baseline of tools, configs, and quality gates
+- Claude Code integration out of the box, with CLAUDE.md, hooks, and project documentation generated automatically
 
 ## Features
 
-- [ ] List key features here
+- Homebrew, Git, Python, and virtualenv setup with dependency installation
+- Ruff linting and formatting with a pre-commit hook that auto-formats staged files
+- detect-secrets pre-commit hook to prevent secrets from being committed
+- Claude Code installation and configuration, including CLAUDE.md and hook scripts
+- pytest with 80% code coverage enforcement via pyproject.toml configuration
+- Optional tools via interactive installation menu: ESLint, Prettier, Bandit, Watchdog
+- Interactive installation menu (`show_installation_menu()`) letting the user choose which optional tools to include
 
 ## Technical Requirements
 
-- [ ] List technical requirements here
+- macOS only (all commands and paths assume macOS)
+- Python 3.11+
+- Node.js (required for Claude Code)
+- Homebrew (optional for detect-secrets, with pip fallback if Homebrew is unavailable)
 
 ## Out of Scope
 
-- [ ] List what is explicitly not included here
+- Windows or Linux support
+- CI/CD pipeline generation
+- Deployment configuration
+- Project templates beyond Python
