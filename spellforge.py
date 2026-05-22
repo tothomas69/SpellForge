@@ -6,12 +6,30 @@ ruff, detect-secrets, Claude Code, hooks, and all config files.
 Verbose + colorful output throughout.
 """
 
+import argparse
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# =============================================================================
+# PYTHON VERSION TARGET
+# Spellforge pins projects to Python 3.13.x. We deliberately do NOT default
+# to whatever `python3` happens to be on PATH because:
+#   - `brew install python3` resolves to the *current* formula (3.14 today),
+#     and 3.14 is too new for our typical dependency matrix (pandas/pydantic
+#     wheels lag, native extensions may not have 3.14 builds yet).
+#   - 3.13 is the current stable release with broad wheel coverage.
+# To bump the target, change the two constants below — every version check
+# in the script reads from these.
+# =============================================================================
+
+PYTHON_TARGET_MINOR = (3, 13)
+PYTHON_TARGET_LABEL = f"{PYTHON_TARGET_MINOR[0]}.{PYTHON_TARGET_MINOR[1]}"
+PYTHON_TARGET_BIN_NAME = f"python{PYTHON_TARGET_LABEL}"  # e.g. "python3.13"
+PYTHON_TARGET_BREW_FORMULA = f"python@{PYTHON_TARGET_LABEL}"  # e.g. "python@3.13"
 
 # =============================================================================
 # ANSI COLOR HELPERS
@@ -88,7 +106,7 @@ def fatal(message):
 # =============================================================================
 
 
-def run(cmd, cwd=None, capture=False, check=True):
+def run(cmd, cwd=None, capture=False, check=True, env=None):
 	"""
 	Run a shell command.
 
@@ -97,6 +115,9 @@ def run(cmd, cwd=None, capture=False, check=True):
 	    cwd: Working directory to run the command in
 	    capture: If True, return stdout instead of printing it
 	    check: If True, raise an error on non-zero exit code
+	    env: Optional dict to override the subprocess environment. When
+	         supplied, replaces the entire env (so callers should merge with
+	         os.environ first if they want PATH inheritance, etc).
 
 	Returns:
 	    CompletedProcess result object
@@ -108,6 +129,7 @@ def run(cmd, cwd=None, capture=False, check=True):
 		capture_output=capture,
 		text=True,
 		check=False,  # We handle errors manually for better messages
+		env=env,
 	)
 	if check and result.returncode != 0:
 		error(f"Command failed: {' '.join(cmd)}")
@@ -129,10 +151,11 @@ def get_project_path():
 	"""
 	step("📁", "Project Location")
 
+	home = Path.home()
 	print(f"""
   {C.WHITE}Where should your new project live?{C.RESET}
-  {C.BLUE}You can enter an absolute path or a path relative to your home directory.{C.RESET}
-  {C.BLUE}Example: ~/Developer/my_project  or  /Users/you/projects/my_project{C.RESET}
+  {C.BLUE}Enter an absolute path, a ~ path, or a name/relative path (resolved from your home directory).{C.RESET}
+  {C.BLUE}Example: ~/Developer/my_project  or  my_project (creates {home}/my_project){C.RESET}
 """)
 
 	while True:
@@ -143,8 +166,11 @@ def get_project_path():
 			warning("Path cannot be empty. Please try again.")
 			continue
 
-		# Expand ~ and resolve to absolute path
-		path = Path(raw).expanduser().resolve()
+		# Expand ~ first, then resolve absolute paths as-is.
+		# Resolve relative paths against home so "my_project" → ~/my_project,
+		# which matches the stated prompt behavior.
+		expanded = Path(raw).expanduser()
+		path = expanded if expanded.is_absolute() else (home / expanded).resolve()
 		info(f"Resolved path: {C.YELLOW}{path}{C.RESET}")
 
 		# If it already exists, confirm they want to use it
@@ -154,9 +180,9 @@ def get_project_path():
 				continue
 			warning(f"Directory already exists: {path}")
 			confirm = (
-				input(f"  {C.BOLD}Use this existing directory? (y/n): {C.RESET}").strip().lower()
+				input(f"  {C.BOLD}Use this existing directory? (Y/n): {C.RESET}").strip().lower()
 			)
-			if confirm != "y":
+			if confirm not in ("y", ""):
 				info("OK, let's try a different path.")
 				continue
 			success(f"Using existing directory: {path}")
@@ -164,11 +190,11 @@ def get_project_path():
 		else:
 			# Directory doesn't exist — offer to create it
 			confirm = (
-				input(f"  {C.BOLD}Directory does not exist. Create it? (y/n): {C.RESET}")
+				input(f"  {C.BOLD}Directory does not exist. Create it? (Y/n): {C.RESET}")
 				.strip()
 				.lower()
 			)
-			if confirm != "y":
+			if confirm not in ("y", ""):
 				info("OK, let's try a different path.")
 				continue
 			path.mkdir(parents=True, exist_ok=True)
@@ -204,7 +230,8 @@ def ensure_homebrew():
 
 	if brew_available():
 		result = run(["brew", "--version"], capture=True, check=False)
-		success(f"Homebrew available: {result.stdout.strip().splitlines()[0]}")
+		version = (result.stdout or result.stderr).strip().splitlines()
+		success(f"Homebrew available: {version[0] if version else 'unknown'}")
 		info("Will use Homebrew to install system tools.")
 
 		# On Apple Silicon, brew lives in /opt/homebrew/bin - ensure it's on PATH
@@ -234,7 +261,7 @@ def ensure_git():
 
 	if shutil.which("git"):
 		result = run(["git", "--version"], capture=True, check=False)
-		success(f"Git already installed: {result.stdout.strip()}")
+		success(f"Git already installed: {(result.stdout or result.stderr).strip()}")
 		return
 
 	if brew_available():
@@ -302,42 +329,154 @@ BASE_PACKAGES = [
 ]
 
 
+def _find_pinned_python() -> str | None:
+	"""
+	Locate a Python interpreter matching PYTHON_TARGET_LABEL on disk.
+
+	Searches, in order:
+	  1. The pinned-version bin name on PATH (e.g. `python3.13`).
+	  2. Homebrew's keg-only formula path on Apple Silicon
+	     (/opt/homebrew/opt/python@3.13/bin/python3.13).
+	  3. Homebrew's keg-only formula path on Intel Macs
+	     (/usr/local/opt/python@3.13/bin/python3.13).
+
+	Returns the absolute path to the interpreter, or None if not found.
+	We search the keg paths explicitly because `python@3.13` is keg-only and
+	may not be linked into /opt/homebrew/bin on machines where the user has
+	a different default Python pinned.
+	"""
+	# 1) Direct PATH lookup for the pinned-version binary
+	found = shutil.which(PYTHON_TARGET_BIN_NAME)
+	if found:
+		return found
+
+	# 2 & 3) Common brew keg locations for python@X.Y
+	candidate_paths = [
+		Path(f"/opt/homebrew/opt/{PYTHON_TARGET_BREW_FORMULA}/bin/{PYTHON_TARGET_BIN_NAME}"),
+		Path(f"/usr/local/opt/{PYTHON_TARGET_BREW_FORMULA}/bin/{PYTHON_TARGET_BIN_NAME}"),
+	]
+	for candidate in candidate_paths:
+		if candidate.exists() and os.access(candidate, os.X_OK):
+			return str(candidate)
+
+	# 4) Last resort: ask brew directly where the formula lives
+	if brew_available():
+		try:
+			result = subprocess.run(
+				["brew", "--prefix", PYTHON_TARGET_BREW_FORMULA],
+				capture_output=True,
+				text=True,
+				check=False,
+			)
+			if result.returncode == 0:
+				prefix = result.stdout.strip()
+				candidate = Path(prefix) / "bin" / PYTHON_TARGET_BIN_NAME
+				if candidate.exists():
+					return str(candidate)
+		except FileNotFoundError:
+			pass
+
+	return None
+
+
 def ensure_python():
 	"""
-	Check that python3 is available.
-	Install via Homebrew if available, otherwise direct the user to
-	python.org — the official installer works fine on corporate machines.
-	Returns the path to the python3 executable to use.
+	Ensure Python PYTHON_TARGET_LABEL (e.g. 3.13) is available, and return
+	its absolute path.
+
+	Order of operations:
+	  1. Look for an existing python3.13 binary in standard locations.
+	  2. If absent and Homebrew is available, `brew install python@3.13`.
+	  3. If brew isn't available, fatal with instructions for python.org.
+
+	We deliberately DO NOT fall back to a generic `python3` on PATH — the
+	whole point of pinning is to refuse silent drift to whatever Python the
+	user happens to have.
 	"""
-	step("🐍", "Python 3")
+	step("🐍", f"Python {PYTHON_TARGET_LABEL}")
 
-	if shutil.which("python3"):
-		result = run(["python3", "--version"], capture=True, check=False)
-		success(f"Python already installed: {result.stdout.strip()}")
-		return shutil.which("python3")
+	# ── First pass: is the pinned version already on disk somewhere? ──────────
+	existing = _find_pinned_python()
+	if existing:
+		result = run([existing, "--version"], capture=True, check=False)
+		version = (result.stdout or result.stderr).strip()
+		success(f"Python {PYTHON_TARGET_LABEL} already installed: {version}")
+		info(f"Using interpreter: {C.YELLOW}{existing}{C.RESET}")
+		return existing
 
+	# ── Not found — install via brew if possible ──────────────────────────────
 	if brew_available():
-		warning("python3 not found - installing via Homebrew...")
-		run(["brew", "install", "python3"])
-		success("Python 3 installed successfully!")
-		return shutil.which("python3")
+		warning(
+			f"{PYTHON_TARGET_BIN_NAME} not found - installing via Homebrew "
+			f"({PYTHON_TARGET_BREW_FORMULA})..."
+		)
+		run(["brew", "install", PYTHON_TARGET_BREW_FORMULA])
 
-	# No brew - python3 must be installed manually
+		# Re-resolve after install
+		installed = _find_pinned_python()
+		if installed:
+			success(f"Python {PYTHON_TARGET_LABEL} installed successfully!")
+			info(f"Using interpreter: {C.YELLOW}{installed}{C.RESET}")
+			return installed
+
+		fatal(
+			f"Homebrew reported success but {PYTHON_TARGET_BIN_NAME} was not\n"
+			f"  found in any expected location. Try:\n"
+			f"    brew reinstall {PYTHON_TARGET_BREW_FORMULA}\n"
+			f"  Then re-run Spellforge."
+		)
+
+	# ── No brew, no pinned Python — manual install required ───────────────────
 	fatal(
-		"python3 not found and Homebrew is not available to install it.\n"
-		"  Please install Python 3 from https://www.python.org/downloads/\n"
-		"  Then re-run Spellforge."
+		f"Python {PYTHON_TARGET_LABEL} is required but not found, and Homebrew\n"
+		f"  is not available to install it automatically.\n\n"
+		f"  Options:\n"
+		f"    • Install Homebrew (https://brew.sh) and re-run Spellforge\n"
+		f"    • Install Python {PYTHON_TARGET_LABEL} from python.org:\n"
+		f"      https://www.python.org/downloads/\n"
+		f"    • Install via pyenv: pyenv install {PYTHON_TARGET_LABEL}\n\n"
+		f"  Spellforge deliberately does not fall back to a different Python\n"
+		f"  version - dependency wheel availability and tooling support are\n"
+		f"  pinned to {PYTHON_TARGET_LABEL}.x."
 	)
+
+
+def _venv_python_version(venv_path: Path) -> tuple[int, int] | None:
+	"""
+	Return the (major, minor) version tuple of the Python inside an existing
+	venv, or None if it can't be determined (binary missing, won't execute).
+	"""
+	venv_python = venv_path / "bin" / "python3"
+	if not venv_python.exists():
+		return None
+	result = subprocess.run(
+		[str(venv_python), "-c", "import sys; print(sys.version_info[0], sys.version_info[1])"],
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+	if result.returncode != 0:
+		return None
+	try:
+		parts = result.stdout.strip().split()
+		return (int(parts[0]), int(parts[1]))
+	except (ValueError, IndexError):
+		return None
 
 
 def create_venv(project_path: Path, python_bin: str):
 	"""
 	Create a Python virtual environment inside the project directory.
-	Skips creation if the venv already exists.
+
+	Skips creation if a venv already exists AND it's the right Python version.
+	If an existing venv is the wrong version (e.g. left over from a prior
+	bootstrap that used a different Python), we fatal with instructions to
+	delete and rerun — silently reusing a stale venv is the bug that lets
+	a hardcoded post_edit hook point at a binary that may or may not exist.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
-	    python_bin: Path to the python3 executable to use.
+	    python_bin: Absolute path to the pinned-version python3 executable.
 
 	Returns:
 	    Path to the venv's pip executable (used for package installs).
@@ -348,19 +487,106 @@ def create_venv(project_path: Path, python_bin: str):
 	pip_bin = venv_path / "bin" / "pip"
 
 	if venv_path.exists():
-		warning(f".venv already exists at {venv_path} - skipping creation.")
+		existing_version = _venv_python_version(venv_path)
+		if existing_version is None:
+			fatal(
+				f"Found existing .venv at {venv_path} but its Python is broken\n"
+				f"  (cannot determine version). Delete it and re-run:\n"
+				f"    rm -rf {venv_path}"
+			)
+		if existing_version != PYTHON_TARGET_MINOR:
+			fatal(
+				f"Found existing .venv at {venv_path} but it uses Python "
+				f"{existing_version[0]}.{existing_version[1]}, not the target "
+				f"{PYTHON_TARGET_LABEL}.\n"
+				f"  Spellforge will not silently reuse a wrong-version venv.\n"
+				f"  Delete it and re-run:\n"
+				f"    rm -rf {venv_path}"
+			)
+		warning(
+			f".venv already exists at {venv_path} with Python "
+			f"{existing_version[0]}.{existing_version[1]} - reusing."
+		)
 	else:
-		info(f"Creating virtual environment at {venv_path}...")
+		info(f"Creating virtual environment at {venv_path} (using {python_bin})...")
 		run([python_bin, "-m", "venv", str(venv_path)])
 		success("Virtual environment created!")
 
 	return str(pip_bin)
 
 
+# =============================================================================
+# PIP HARDENING HELPERS
+# Even when you invoke a venv's pip by absolute path, pip honors user-level
+# config files (~/.config/pip/pip.conf, pip.ini) and these environment
+# variables: PIP_USER, PIP_TARGET, PIP_PREFIX, PIP_INDEX_URL. On managed
+# corporate Macs, IT sometimes pre-configures PIP_USER=1 or PIP_TARGET=...
+# which silently redirects installs OUT of the venv. We defend against this
+# by (a) invoking pip via `python -m pip` from the venv's interpreter
+# (strict venv isolation), (b) passing --no-user --isolated, and (c)
+# stripping the redirecting env vars from the subprocess environment.
+# =============================================================================
+
+
+def _venv_python_from_pip_bin(pip_bin: str) -> str:
+	"""
+	Derive the venv's python3 executable from the venv's pip path.
+	Both live in the same bin/ directory.
+	"""
+	return str(Path(pip_bin).parent / "python3")
+
+
+def _isolated_pip_env() -> dict:
+	"""
+	Return an environment dict for pip subprocesses that defeats user-level
+	redirection. Inherits PATH and other vars from the parent process but
+	clobbers the pip-specific knobs that could send installs astray.
+	"""
+	env = os.environ.copy()
+	# Defeat PIP_USER=1 (which would install to ~/.local instead of the venv)
+	env["PIP_USER"] = "0"
+	# Defeat PIP_TARGET / PIP_PREFIX (which would redirect to alternate dirs)
+	env.pop("PIP_TARGET", None)
+	env.pop("PIP_PREFIX", None)
+	# Tell pip to ignore site-packages from outside the venv when resolving
+	env["PIP_REQUIRE_VIRTUALENV"] = "true"
+	return env
+
+
+def _pip_install(pip_bin: str, packages: list[str], upgrade_pip_first: bool = False):
+	"""
+	Install packages into the venv using strict isolation.
+
+	Uses `<venv>/bin/python3 -m pip install --no-user --isolated <packages>`
+	with PIP_USER=0 and PIP_TARGET/PIP_PREFIX stripped, so the install lands
+	in the venv's site-packages regardless of user-level pip config.
+
+	Args:
+	    pip_bin: Path to the venv's pip executable (used to derive python3).
+	    packages: List of package specifiers to install.
+	    upgrade_pip_first: If True, run `pip install --upgrade pip` first.
+	"""
+	venv_python = _venv_python_from_pip_bin(pip_bin)
+	env = _isolated_pip_env()
+
+	if upgrade_pip_first:
+		run(
+			[venv_python, "-m", "pip", "install", "--no-user", "--isolated", "--upgrade", "pip"],
+			env=env,
+		)
+
+	run(
+		[venv_python, "-m", "pip", "install", "--no-user", "--isolated"] + packages,
+		env=env,
+	)
+
+
 def install_base_packages(pip_bin: str, project_path: Path):
 	"""
 	Install the base package set into the project venv.
-	Uses pip from the venv so packages are isolated to this project.
+
+	Uses strict pip isolation (see _pip_install) so installs land in the venv
+	regardless of user-level pip.conf or PIP_USER environment variables.
 
 	Args:
 	    pip_bin: Path to the venv's pip executable.
@@ -370,19 +596,16 @@ def install_base_packages(pip_bin: str, project_path: Path):
 
 	info(f"Packages to install: {C.YELLOW}{', '.join(BASE_PACKAGES)}{C.RESET}")
 
-	# Upgrade pip first — old pip versions can cause install failures
-	info("Upgrading pip to latest version...")
-	run([pip_bin, "install", "--upgrade", "pip"])
-
-	# Install all base packages in one pip call for speed
-	info("Installing base packages...")
-	run([pip_bin, "install"] + BASE_PACKAGES)
+	# Upgrade pip first then install — both in a single helper call
+	info("Upgrading pip and installing base packages (isolated from user pip.conf)...")
+	_pip_install(pip_bin, BASE_PACKAGES, upgrade_pip_first=True)
 
 	success(f"All {len(BASE_PACKAGES)} base packages installed!")
 
 	# Show what's installed so the user has a clear record
 	info("Installed package versions:")
-	result = run([pip_bin, "freeze"], capture=True, check=False)
+	venv_python = _venv_python_from_pip_bin(pip_bin)
+	result = run([venv_python, "-m", "pip", "freeze"], capture=True, check=False)
 	for line in result.stdout.strip().splitlines():
 		# Only show our base packages, not pip's own deps
 		if any(pkg.lower().replace("-", "_") in line.lower() for pkg in BASE_PACKAGES):
@@ -399,8 +622,8 @@ def install_base_packages(pip_bin: str, project_path: Path):
 def install_detect_secrets(pip_bin: str):
 	"""
 	Install detect-secrets for pre-commit secret scanning.
-	Tries Homebrew first (preferred, system-wide). Falls back to pip
-	into the venv if brew is unavailable or the install fails.
+	Tries Homebrew first (preferred, system-wide) when brew is available.
+	Falls back to pip into the venv (with isolation) otherwise.
 
 	Args:
 	    pip_bin: Path to the venv pip, used as fallback install target.
@@ -410,24 +633,31 @@ def install_detect_secrets(pip_bin: str):
 	"""
 	step("🕵️", "detect-secrets (Secret Scanning)")
 
-	# ── Try Homebrew first ────────────────────────────────────────────────────
-	info("Attempting to install detect-secrets via Homebrew (preferred)...")
-	brew_result = run(["brew", "install", "detect-secrets"], check=False)
+	# ── Try Homebrew first — but only if brew exists ──────────────────────────
+	# Previously this called `brew install` unconditionally, which raises
+	# FileNotFoundError on machines without Homebrew (crash, not graceful
+	# fallback). The guard below restores the intended behavior.
+	if brew_available():
+		info("Attempting to install detect-secrets via Homebrew (preferred)...")
+		brew_result = run(["brew", "install", "detect-secrets"], check=False)
 
-	if brew_result.returncode == 0:
-		detect_secrets_bin = shutil.which("detect-secrets")
-		if detect_secrets_bin:
-			success(f"detect-secrets installed via Homebrew: {detect_secrets_bin}")
-			return detect_secrets_bin
-		warning(
-			"brew install succeeded but detect-secrets not found on PATH - falling back to pip."
-		)
+		if brew_result.returncode == 0:
+			detect_secrets_bin = shutil.which("detect-secrets")
+			if detect_secrets_bin:
+				success(f"detect-secrets installed via Homebrew: {detect_secrets_bin}")
+				return detect_secrets_bin
+			warning(
+				"brew install succeeded but detect-secrets not found on PATH - "
+				"falling back to pip."
+			)
+		else:
+			warning("Homebrew install failed - falling back to pip install into venv.")
 	else:
-		warning("Homebrew install failed - falling back to pip install into venv.")
+		info("Homebrew not available - installing detect-secrets via pip into venv.")
 
-	# ── Fallback: install into the venv via pip ───────────────────────────────
+	# ── Fallback: install into the venv via pip (isolated) ────────────────────
 	info("Installing detect-secrets into venv via pip...")
-	run([pip_bin, "install", "detect-secrets"])
+	_pip_install(pip_bin, ["detect-secrets"])
 
 	# The venv bin directory is one level up from pip itself
 	venv_bin_dir = Path(pip_bin).parent
@@ -485,7 +715,7 @@ PYPROJECT_CONTENT = """
 name = "{project_name}"
 version = "0.1.0"
 description = ""
-requires-python = ">=3.11"
+requires-python = ">={target},<{next_major_minor}"
 dependencies = [
     "pandas",
     "requests",
@@ -540,8 +770,15 @@ def configure_pyproject(project_path: Path, project_name: str):
 
 	pyproject_path = project_path / "pyproject.toml"
 
-	# Substitute the project name into the template
-	rendered = PYPROJECT_CONTENT.format(project_name=project_name)
+	# Substitute the project name and pinned Python version into the template.
+	# next_major_minor reads e.g. "3.14" when target is "3.13", giving us the
+	# exclusive upper bound for requires-python.
+	next_major_minor = f"{PYTHON_TARGET_MINOR[0]}.{PYTHON_TARGET_MINOR[1] + 1}"
+	rendered = PYPROJECT_CONTENT.format(
+		project_name=project_name,
+		target=PYTHON_TARGET_LABEL,
+		next_major_minor=next_major_minor,
+	)
 
 	if pyproject_path.exists():
 		existing = pyproject_path.read_text()
@@ -579,20 +816,24 @@ def ensure_node():
 	"""
 	if shutil.which("node"):
 		result = run(["node", "--version"], capture=True, check=False)
-		success(f"Node.js already installed: {result.stdout.strip()}")
+		success(f"Node.js already installed: {(result.stdout or result.stderr).strip()}")
 		return
 
 	if brew_available():
-		warning("Node.js not found - installing via Homebrew...")
-		run(["brew", "install", "node"])
-		success("Node.js installed!")
-		return
+		warning("Node.js not found - attempting install via Homebrew...")
+		result = run(["brew", "install", "node"], check=False)
+		if result.returncode == 0 and shutil.which("node"):
+			success("Node.js installed!")
+			return
+		warning("Homebrew install failed (corporate Workbrew restrictions?). Try installing Node.js manually.")
 
-	# No brew - node must be installed manually
+	# Brew unavailable or failed - node must be installed manually
 	fatal(
-		"Node.js not found and Homebrew is not available to install it.\n"
+		"Node.js not found and could not be installed automatically.\n"
 		"  Node.js is required to install Claude Code.\n"
-		"  Please install Node.js from https://nodejs.org/\n"
+		"  Options:\n"
+		"    • Install via nvm: https://github.com/nvm-sh/nvm\n"
+		"    • Download installer: https://nodejs.org/\n"
 		"  Then re-run Spellforge."
 	)
 
@@ -605,14 +846,14 @@ def install_claude_code():
 	"""
 	step("🤖", "Claude Code")
 
-	# ── Ensure Node.js is available first ────────────────────────────────────
-	ensure_node()
-
 	# ── Check if claude is already installed ─────────────────────────────────
 	if shutil.which("claude"):
 		result = run(["claude", "--version"], capture=True, check=False)
-		success(f"Claude Code already installed: {result.stdout.strip()}")
+		success(f"Claude Code already installed: {(result.stdout or result.stderr).strip()}")
 		return
+
+	# ── Claude not found — need Node.js to install it ─────────────────────────
+	ensure_node()
 
 	info("Installing Claude Code globally via npm...")
 	run(["npm", "install", "-g", "@anthropic-ai/claude-code"])
@@ -1133,9 +1374,10 @@ def print_summary(project_path: Path):
 {C.BOLD}Next steps:{C.RESET}
   1. {C.CYAN}cd {project_path}{C.RESET}
   2. {C.CYAN}source .venv/bin/activate{C.RESET}   ← activate your virtual environment
-  3. {C.CYAN}claude{C.RESET}                       ← start a Claude Code session
-  4. Fill in {C.YELLOW}docs/prd.md{C.RESET} with your project goals
-  5. Fill in {C.YELLOW}docs/as-built-project-guide.md{C.RESET} as you build
+  3. {C.CYAN}pytest tests/ -v{C.RESET}             ← verify everything is working
+  4. {C.CYAN}claude{C.RESET}                       ← start a Claude Code session
+  5. Fill in {C.YELLOW}docs/prd.md{C.RESET} with your project goals
+  6. Fill in {C.YELLOW}docs/as-built-project-guide.md{C.RESET} as you build
 
 {C.BOLD}Useful paths:{C.RESET}
   Python:  {C.YELLOW}{venv_python}{C.RESET}
@@ -1451,7 +1693,7 @@ def verify_tests_directory(project_path: Path):
 
 def install_bandit(pip_bin: str, project_path: Path):
 	"""
-	Install bandit into the project venv via pip.
+	Install bandit into the project venv via pip (isolated).
 	Bandit scans Python source for common security vulnerabilities -
 	hardcoded passwords, unsafe eval(), SQL injection patterns, weak crypto.
 
@@ -1460,8 +1702,8 @@ def install_bandit(pip_bin: str, project_path: Path):
 	    project_path: The resolved Path to the project root directory.
 	"""
 	step("🔐", "Bandit (Security Scanner)")
-	info("Installing bandit into venv via pip...")
-	run([pip_bin, "install", "bandit"])
+	info("Installing bandit into venv via pip (isolated)...")
+	_pip_install(pip_bin, ["bandit"])
 
 	# Write a pyproject.toml bandit config section - skips test files
 	# since test code intentionally uses patterns bandit would flag
@@ -1498,7 +1740,8 @@ def verify_bandit(pip_bin: str):
 	if result.returncode != 0:
 		fatal("Bandit verification failed - '--version' returned an error.")
 
-	success(f"✔ Verified Bandit: {result.stdout.strip().splitlines()[0]}")
+	bandit_ver = (result.stdout or result.stderr).strip().splitlines()
+	success(f"✔ Verified Bandit: {bandit_ver[0] if bandit_ver else 'unknown'}")
 
 
 def verify_eslint():
@@ -1513,7 +1756,7 @@ def verify_eslint():
 	if result.returncode != 0:
 		fatal("ESLint verification failed - 'eslint --version' returned an error.")
 
-	success(f"✔ Verified ESLint: {result.stdout.strip()}")
+	success(f"✔ Verified ESLint: {(result.stdout or result.stderr).strip()}")
 
 
 def verify_prettier():
@@ -1528,7 +1771,7 @@ def verify_prettier():
 	if result.returncode != 0:
 		fatal("Prettier verification failed - 'prettier --version' returned an error.")
 
-	success(f"✔ Verified Prettier: v{result.stdout.strip()}")
+	success(f"✔ Verified Prettier: v{(result.stdout or result.stderr).strip()}")
 
 
 # =============================================================================
@@ -1545,7 +1788,8 @@ def verify_homebrew():
 	"""
 	if brew_available():
 		result = run(["brew", "--version"], capture=True, check=False)
-		success(f"✔ Homebrew available: {result.stdout.strip().splitlines()[0]}")
+		brew_ver = (result.stdout or result.stderr).strip().splitlines()
+		success(f"✔ Homebrew available: {brew_ver[0] if brew_ver else 'unknown'}")
 	else:
 		warning("Homebrew not available - fallback install methods will be used.")
 
@@ -1560,7 +1804,7 @@ def verify_git():
 	result = run(["git", "--version"], capture=True, check=False)
 	if result.returncode != 0:
 		fatal("Git verification failed - 'git --version' returned an error.")
-	success(f"✔ Verified Git: {result.stdout.strip()}")
+	success(f"✔ Verified Git: {(result.stdout or result.stderr).strip()}")
 
 
 def verify_git_repo(project_path: Path):
@@ -1582,23 +1826,62 @@ def verify_git_repo(project_path: Path):
 	success(f"✔ Verified git repo: {git_dir}")
 
 
-def verify_python():
+def verify_python(python_bin: str | None = None):
 	"""
-	Confirm python3 is on PATH and returns a valid version string.
-	We need python3 to create the venv and run project code.
+	Confirm the pinned Python interpreter is on disk, runnable, and reports
+	the expected major.minor version.
+
+	Args:
+	    python_bin: Absolute path to the interpreter returned by ensure_python().
+	                If None (legacy callers), falls back to PATH discovery but
+	                still requires the result to match PYTHON_TARGET_LABEL.
 	"""
-	if not shutil.which("python3"):
-		fatal("Python verification failed - 'python3' not found on PATH after install.")
-	result = run(["python3", "--version"], capture=True, check=False)
+	if python_bin is None:
+		python_bin = _find_pinned_python()
+		if python_bin is None:
+			fatal(
+				f"Python verification failed - {PYTHON_TARGET_BIN_NAME} not found "
+				"on PATH or in standard brew locations after install."
+			)
+
+	if not Path(python_bin).exists():
+		fatal(f"Python verification failed - {python_bin} does not exist.")
+
+	# Ask the interpreter for its actual version tuple — don't trust the
+	# binary name alone (some installs ship `python3.13` as a wrapper around
+	# a different version).
+	result = run(
+		[python_bin, "-c", "import sys; print(sys.version_info[0], sys.version_info[1])"],
+		capture=True,
+		check=False,
+	)
 	if result.returncode != 0:
-		fatal("Python verification failed - 'python3 --version' returned an error.")
-	success(f"✔ Verified Python: {result.stdout.strip()}")
+		fatal(f"Python verification failed - '{python_bin} --version' returned an error.")
+
+	try:
+		parts = result.stdout.strip().split()
+		actual = (int(parts[0]), int(parts[1]))
+	except (ValueError, IndexError):
+		fatal(f"Python verification failed - could not parse version from {python_bin}.")
+
+	if actual != PYTHON_TARGET_MINOR:
+		fatal(
+			f"Python verification failed - {python_bin} reports "
+			f"{actual[0]}.{actual[1]} but Spellforge requires {PYTHON_TARGET_LABEL}."
+		)
+
+	version_result = run([python_bin, "--version"], capture=True, check=False)
+	success(
+		f"✔ Verified Python: {(version_result.stdout or version_result.stderr).strip()} "
+		f"({python_bin})"
+	)
 
 
 def verify_venv(project_path: Path):
 	"""
-	Confirm the virtual environment was created correctly by checking
-	that both the python3 and pip executables exist and are runnable.
+	Confirm the virtual environment was created correctly by checking that
+	the python3 and pip executables exist, are runnable, and that the venv
+	Python reports the pinned major.minor version.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1619,15 +1902,34 @@ def verify_venv(project_path: Path):
 	if result.returncode != 0:
 		fatal("Venv verification failed - venv python3 could not execute a test expression.")
 
+	# Defense in depth: re-verify the venv Python is the target version,
+	# even though create_venv should have guaranteed it.
+	actual = _venv_python_version(project_path / ".venv")
+	if actual != PYTHON_TARGET_MINOR:
+		fatal(
+			f"Venv verification failed - venv Python is "
+			f"{actual[0] if actual else '?'}.{actual[1] if actual else '?'}, "
+			f"expected {PYTHON_TARGET_LABEL}."
+		)
+
 	success(f"✔ Verified venv: {project_path / '.venv'}")
-	info(f"  Venv Python: {result.stdout.strip().splitlines()[0]}")
+	venv_ver = (result.stdout or result.stderr).strip().splitlines()
+	info(f"  Venv Python: {venv_ver[0] if venv_ver else 'unknown'}")
 
 
 def verify_packages(project_path: Path):
 	"""
-	Confirm every base package can actually be imported from inside the venv.
+	Confirm every base package can actually be imported from inside the venv,
+	and that every expected CLI tool exists at its expected path.
+
 	A successful pip install doesn't always mean imports work - this catches
 	broken wheels, missing C extensions, and other silent failures.
+
+	**Strict mode:** missing CLI tools are FATAL, not warnings. Previously
+	this function only printed an error and continued, which let a broken
+	bootstrap proceed to write a post-edit hook pointing at a non-existent
+	ruff binary - producing the "Ruff not found at .../.venv/bin/ruff" error
+	at Claude Code edit time instead of at bootstrap time.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1658,24 +1960,39 @@ def verify_packages(project_path: Path):
 		"pytest": str(project_path / ".venv" / "bin" / "pytest"),
 		"pytest-cov": str(project_path / ".venv" / "bin" / "pytest"),
 	}
+	missing_cli: list[str] = []
 	for tool, binary in cli_tools.items():
 		if Path(binary).exists():
 			success(f"✔ Verified CLI tool: {tool}")
 		else:
 			error(f"✘ CLI tool not found: {tool} at {binary}")
-			pass  # non-fatal, pip may have installed it elsewhere
+			missing_cli.append(tool)
 
-	all_passed = True
+	failed_imports: list[str] = []
 	for package, module in import_names.items():
 		result = run([venv_python, "-c", f"import {module}"], capture=True, check=False)
 		if result.returncode != 0:
 			error(f"✘ Package import failed: {package} (tried: import {module})")
-			all_passed = False
+			failed_imports.append(package)
 		else:
 			success(f"✔ Verified import: {module}")
 
-	if not all_passed:
-		fatal("One or more base packages failed to import. Check pip install output above.")
+	if missing_cli or failed_imports:
+		# This is the gate that used to be open. Slam it shut.
+		details = []
+		if missing_cli:
+			details.append(f"missing CLI tools: {', '.join(missing_cli)}")
+		if failed_imports:
+			details.append(f"failed imports: {', '.join(failed_imports)}")
+		fatal(
+			"Package verification failed - " + "; ".join(details) + ".\n"
+			"  Inspect the pip install output above for the root cause.\n"
+			"  Common causes:\n"
+			"    • Network failure mid-install (re-run Spellforge)\n"
+			"    • User-level pip config redirecting installs out of the venv\n"
+			"      (check: pip config list -v   |   env | grep -i pip)\n"
+			"    • Stale or broken .venv (delete it and re-run, or use --repair)"
+		)
 
 
 def verify_detect_secrets(detect_secrets_bin: str):
@@ -1694,7 +2011,7 @@ def verify_detect_secrets(detect_secrets_bin: str):
 	if result.returncode != 0:
 		fatal("detect-secrets verification failed - '--version' returned an error.")
 
-	success(f"✔ Verified detect-secrets: {result.stdout.strip()}")
+	success(f"✔ Verified detect-secrets: {(result.stdout or result.stderr).strip()}")
 
 
 def verify_secrets_baseline(project_path: Path):
@@ -1769,7 +2086,7 @@ def verify_claude_code():
 	if result.returncode != 0:
 		fatal("Claude Code verification failed - 'claude --version' returned an error.")
 
-	success(f"✔ Verified Claude Code: {result.stdout.strip()}")
+	success(f"✔ Verified Claude Code: {(result.stdout or result.stderr).strip()}")
 
 
 def verify_directory_structure(project_path: Path):
@@ -2099,18 +2416,18 @@ def show_installation_menu() -> InstallChoices:
 		print(f"     {C.BLUE}{why}{C.RESET}")
 
 		answer = (
-			input(f"     {C.BOLD}{C.MAGENTA}>>> Install {name}? (y/n): {C.RESET}").strip().lower()
+			input(f"     {C.BOLD}{C.MAGENTA}>>> Install {name}? (Y/n): {C.RESET}").strip().lower()
 		)
 
 		# Store the choice on the InstallChoices object by tool name
 		if name == "ESLint":
-			choices.eslint = answer == "y"
+			choices.eslint = answer in ("y", "")
 		elif name == "Prettier":
-			choices.prettier = answer == "y"
+			choices.prettier = answer in ("y", "")
 		elif name == "Watchdog":
-			choices.watchdog = answer == "y"
+			choices.watchdog = answer in ("y", "")
 		elif name == "Bandit":
-			choices.bandit = answer == "y"
+			choices.bandit = answer in ("y", "")
 
 		status = (
 			f"{C.GREEN}yes - will install{C.RESET}"
@@ -2147,7 +2464,22 @@ def show_installation_menu() -> InstallChoices:
 	return choices
 
 
-if __name__ == "__main__":
+# =============================================================================
+# ENTRY-POINT FLOWS
+# Two modes are supported:
+#   * Fresh install — the default, full interactive flow with menu, prompts,
+#     git init, doc generation, claude code install. Use for a new project.
+#   * Repair        — non-interactive, targeted at an existing project that
+#     was bootstrapped by Spellforge before but has a broken venv or missing
+#     ruff/pytest binary. Skips git/docs/claude-code setup and just rebuilds
+#     Python + venv + base packages + post-edit hook + verifications.
+# =============================================================================
+
+
+def do_fresh_install():
+	"""
+	Run the full interactive bootstrap for a new project.
+	"""
 	banner()
 
 	# ── Installation menu - shown before anything runs ────────────────────────
@@ -2170,7 +2502,7 @@ if __name__ == "__main__":
 
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
-	verify_python()
+	verify_python(python_bin)
 	pip_bin = create_venv(project_path, python_bin)
 	verify_venv(project_path)
 
@@ -2199,25 +2531,28 @@ if __name__ == "__main__":
 	# ── ESLint (optional) ─────────────────────────────────────────────────────
 	if choices.eslint:
 		step("🔍", "ESLint (Frontend Linter)")
-		run(["npm", "install", "-g", "eslint"])
-		eslint_config_path = project_path / "eslint.config.js"
-		eslint_config_path.write_text(
-			"// eslint.config.js - ESLint flat config (v9+)\n"
-			"export default [\n"
-			"  {\n"
-			"    rules: {\n"
-			'      "no-unused-vars": "error",\n'
-			'      "no-undef":       "error",\n'
-			'      "no-console":     "warn",\n'
-			'      "eqeqeq":         "error",\n'
-			'      "prefer-const":   "error",\n'
-			'      "no-var":         "error",\n'
-			"    }\n"
-			"  }\n"
-			"];\n"
-		)
-		success(f"Written: {eslint_config_path}")
-		verify_eslint()
+		if not shutil.which("npm"):
+			warning("npm not found - skipping ESLint. Install Node.js first if needed.")
+		else:
+			run(["npm", "install", "-g", "eslint"])
+			eslint_config_path = project_path / "eslint.config.js"
+			eslint_config_path.write_text(
+				"// eslint.config.js - ESLint flat config (v9+)\n"
+				"export default [\n"
+				"  {\n"
+				"    rules: {\n"
+				'      "no-unused-vars": "error",\n'
+				'      "no-undef":       "error",\n'
+				'      "no-console":     "warn",\n'
+				'      "eqeqeq":         "error",\n'
+				'      "prefer-const":   "error",\n'
+				'      "no-var":         "error",\n'
+				"    }\n"
+				"  }\n"
+				"];\n"
+			)
+			success(f"Written: {eslint_config_path}")
+			verify_eslint()
 
 	# ── Bandit (optional) ────────────────────────────────────────────────────
 	if choices.bandit:
@@ -2226,27 +2561,30 @@ if __name__ == "__main__":
 	# ── Prettier (optional) ───────────────────────────────────────────────────
 	if choices.prettier:
 		step("✨", "Prettier (Frontend Formatter)")
-		run(["npm", "install", "-g", "prettier"])
-		prettierrc_path = project_path / ".prettierrc"
-		prettierrc = {
-			"tabWidth": 4,
-			"useTabs": True,
-			"singleQuote": False,
-			"printWidth": 100,
-			"trailingComma": "es5",
-			"bracketSpacing": True,
-			"semi": True,
-		}
-		prettierrc_path.write_text(json.dumps(prettierrc, indent=2))
-		success(f"Written: {prettierrc_path}")
-		prettierignore_path = project_path / ".prettierignore"
-		prettierignore_path.write_text(
-			"# Prettier ignore - generated and non-source files\n"
-			".venv/\nnode_modules/\n__pycache__/\ndist/\nbuild/\n"
-			"*.egg-info/\ncoverage/\n.coverage\n"
-		)
-		success(f"Written: {prettierignore_path}")
-		verify_prettier()
+		if not shutil.which("npm"):
+			warning("npm not found - skipping Prettier. Install Node.js first if needed.")
+		else:
+			run(["npm", "install", "-g", "prettier"])
+			prettierrc_path = project_path / ".prettierrc"
+			prettierrc = {
+				"tabWidth": 4,
+				"useTabs": True,
+				"singleQuote": False,
+				"printWidth": 100,
+				"trailingComma": "es5",
+				"bracketSpacing": True,
+				"semi": True,
+			}
+			prettierrc_path.write_text(json.dumps(prettierrc, indent=2))
+			success(f"Written: {prettierrc_path}")
+			prettierignore_path = project_path / ".prettierignore"
+			prettierignore_path.write_text(
+				"# Prettier ignore - generated and non-source files\n"
+				".venv/\nnode_modules/\n__pycache__/\ndist/\nbuild/\n"
+				"*.egg-info/\ncoverage/\n.coverage\n"
+			)
+			success(f"Written: {prettierignore_path}")
+			verify_prettier()
 
 	# ── Directory structure + all project files ───────────────────────────────
 	create_directory_structure(project_path)
@@ -2277,3 +2615,137 @@ if __name__ == "__main__":
 
 	# ── Summary ───────────────────────────────────────────────────────────────
 	print_summary(project_path)
+
+
+def do_repair(target_path: Path, rebuild_venv: bool = False):
+	"""
+	Repair an existing Spellforge-managed project.
+
+	Re-validates the pinned Python, ensures the venv is correct (optionally
+	rebuilding it), reinstalls base packages with strict isolation,
+	regenerates the post-edit hook, and runs the full verification suite.
+
+	Does NOT touch: git history, pyproject.toml, .claude/settings.local.json,
+	CLAUDE.md, docs/, tests/, .gitignore, pre-commit hook, or any other
+	project content. This is strictly a "my tooling is broken, fix it" path.
+
+	Args:
+	    target_path: Path to an existing project root.
+	    rebuild_venv: If True, delete .venv before recreating. Use this when
+	                  you suspect the venv itself is corrupt or wrong-version.
+	"""
+	banner()
+	step("🔧", f"REPAIR MODE - {target_path}")
+
+	# Resolve and validate the target
+	target_path = target_path.expanduser().resolve()
+	if not target_path.exists():
+		fatal(f"Repair target does not exist: {target_path}")
+	if not target_path.is_dir():
+		fatal(f"Repair target is not a directory: {target_path}")
+
+	info(f"Repairing project at: {C.YELLOW}{target_path}{C.RESET}")
+
+	# Optional venv nuke — useful when the existing venv is wrong-version or
+	# obviously broken and the user wants a clean rebuild.
+	venv_path = target_path / ".venv"
+	if rebuild_venv and venv_path.exists():
+		warning(f"--rebuild-venv specified - removing {venv_path}")
+		shutil.rmtree(venv_path)
+		success(f"Removed {venv_path}")
+
+	# ── Python + venv + packages ──────────────────────────────────────────────
+	python_bin = ensure_python()
+	verify_python(python_bin)
+	pip_bin = create_venv(target_path, python_bin)
+	verify_venv(target_path)
+
+	# Detect whether watchdog was previously installed so we re-verify it.
+	# We check by looking inside the venv's site-packages rather than relying
+	# on a config file, since the user may have installed it manually.
+	venv_python = _venv_python_from_pip_bin(pip_bin)
+	watchdog_check = subprocess.run(
+		[venv_python, "-c", "import watchdog"],
+		capture_output=True,
+		check=False,
+	)
+	if watchdog_check.returncode == 0 and "watchdog" not in BASE_PACKAGES:
+		info("Detected existing watchdog install - including in re-verification.")
+		BASE_PACKAGES.append("watchdog")
+
+	install_base_packages(pip_bin, target_path)
+	verify_packages(target_path)
+
+	# ── Regenerate the post-edit hook ─────────────────────────────────────────
+	# This is the whole point of repair mode — if the hook is pointing at a
+	# missing ruff, regenerating it after fixing the venv puts everything
+	# back in sync. (The hook content is path-derived so it's safe to
+	# overwrite even if the user manually customized it; we warn first.)
+	hook_path = target_path / ".claude" / "hooks" / "post_edit.sh"
+	if hook_path.exists():
+		info(f"Overwriting existing hook: {hook_path}")
+	else:
+		# Ensure parent dirs exist for a project that maybe never had a hook
+		hook_path.parent.mkdir(parents=True, exist_ok=True)
+	write_post_edit_hook(target_path)
+	verify_post_edit_hook(target_path)
+
+	# ── Summary ───────────────────────────────────────────────────────────────
+	step("✅", "Repair complete")
+	success(f"Project at {target_path} is back in working order.")
+	info("What was repaired:")
+	info(f"  • Python {PYTHON_TARGET_LABEL} confirmed at {python_bin}")
+	info(f"  • Venv validated and base packages reinstalled at {venv_path}")
+	info(f"  • Post-edit hook regenerated at {hook_path}")
+	info("What was NOT touched:")
+	info("  • git history, pyproject.toml, CLAUDE.md, docs/, tests/")
+	info("  • settings.local.json, pre-commit hook, .gitignore")
+
+
+def _parse_args() -> argparse.Namespace:
+	"""
+	Parse command-line arguments.
+
+	Subcommand-free design: bare `spellforge.py` runs the full interactive
+	fresh install; `--repair PATH` switches to repair mode. This keeps the
+	happy-path one-word invocation while making repair a discoverable flag.
+	"""
+	parser = argparse.ArgumentParser(
+		prog="spellforge",
+		description=(
+			"Spellforge — Claude-powered project bootstrapper. "
+			f"Pins projects to Python {PYTHON_TARGET_LABEL}.x."
+		),
+	)
+	parser.add_argument(
+		"--repair",
+		metavar="PATH",
+		type=Path,
+		default=None,
+		help=(
+			"Repair an existing Spellforge-managed project at PATH. "
+			"Re-validates Python, rebuilds the venv if needed, reinstalls "
+			"base packages with strict pip isolation, and regenerates the "
+			"post-edit hook. Does not touch git, docs, or project config."
+		),
+	)
+	parser.add_argument(
+		"--rebuild-venv",
+		action="store_true",
+		help=(
+			"Only valid with --repair. Deletes the existing .venv before "
+			"recreating it. Use when you suspect the venv is corrupt or "
+			"on the wrong Python version."
+		),
+	)
+	return parser.parse_args()
+
+
+if __name__ == "__main__":
+	args = _parse_args()
+	if args.repair is not None:
+		do_repair(args.repair, rebuild_venv=args.rebuild_venv)
+	else:
+		if args.rebuild_venv:
+			fatal("--rebuild-venv requires --repair (it only applies in repair mode).")
+		do_fresh_install()

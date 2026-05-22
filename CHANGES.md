@@ -1,0 +1,131 @@
+# Spellforge Hardening Pass — Changelog
+
+A summary of changes applied to `spellforge.py` in this pass. The goal was to
+fix the silent-failure mode that produced your `⚠ Ruff not found at
+.../.venv/bin/ruff` error and to pin projects to Python 3.13.x instead of
+inheriting whatever `python3` happened to resolve to.
+
+## 1. Python version pinning (3.13.x)
+
+- New module-level constants near the top: `PYTHON_TARGET_MINOR = (3, 13)`,
+  `PYTHON_TARGET_LABEL`, `PYTHON_TARGET_BIN_NAME` (`python3.13`),
+  `PYTHON_TARGET_BREW_FORMULA` (`python@3.13`). Bumping the target is now a
+  one-line change.
+- Rewrote `ensure_python()`. It no longer accepts whatever `python3` is on
+  PATH. New discovery order:
+    1. `python3.13` on PATH
+    2. `/opt/homebrew/opt/python@3.13/bin/python3.13` (Apple Silicon)
+    3. `/usr/local/opt/python@3.13/bin/python3.13` (Intel)
+    4. `brew --prefix python@3.13` lookup
+    5. `brew install python@3.13` if brew is available
+    6. Fatal with python.org / pyenv instructions if brew isn't available
+- Rewrote `verify_python(python_bin)`. Now takes an explicit interpreter path
+  and asserts `sys.version_info[:2] == (3, 13)`. Refuses to trust the
+  binary's *name* alone (wrapper shenanigans).
+- Updated `requires-python` in the generated `pyproject.toml` from `">=3.11"`
+  to `">=3.13,<3.14"`. Renders from the same constants so the two never
+  drift apart.
+- `verify_venv()` now also re-verifies the venv Python is 3.13 (defense in
+  depth — `create_venv` should have already guaranteed this).
+
+## 2. Stop silent reuse of wrong-version venvs
+
+- `create_venv()` no longer blindly reuses an existing `.venv`. New
+  `_venv_python_version()` helper reports the existing venv's actual major.
+  minor; if it's not 3.13, Spellforge fatals with a clear "delete and rerun"
+  message. The previous behavior — printing "skipping creation" and reusing
+  whatever was there — was a major contributor to the failure mode you hit.
+
+## 3. Hardened pip installs (the headline fix)
+
+This is the change that prevents your specific failure from recurring.
+
+- New helper `_isolated_pip_env()` returns an environment dict with:
+    - `PIP_USER=0` (defeats `PIP_USER=1` from user environment)
+    - `PIP_REQUIRE_VIRTUALENV=true` (extra paranoia)
+    - `PIP_TARGET` and `PIP_PREFIX` removed (defeats redirected installs)
+- New helper `_pip_install(pip_bin, packages, upgrade_pip_first=False)`
+  invokes pip via `<venv>/bin/python3 -m pip install --no-user --isolated`
+  instead of the venv's `pip` script directly. `--isolated` ignores user
+  pip.conf entirely. `--no-user` overrides `user = true` in pip.conf.
+- `run()` extended with optional `env=` parameter so the isolation env can
+  be threaded through subprocess calls.
+- All package installs (`install_base_packages`, `install_detect_secrets`
+  pip fallback, `install_bandit`) routed through `_pip_install`. No more
+  raw `pip_bin install` calls anywhere in the script.
+
+## 4. Verification actually fatals now
+
+`verify_packages()`:
+
+- The dead `pass` after a missing-CLI-tool error is gone.
+- Missing CLI tools and failed imports are aggregated into two lists.
+- If either list is non-empty at the end, `fatal()` is called with a
+  detailed message including the most likely root causes (network failure,
+  user pip config, stale venv) and the diagnostic commands to run.
+- This is the gate that was open before — your bootstrap could write a
+  post-edit hook pointing at a non-existent ruff binary and exit clean.
+  That door is now locked.
+
+## 5. Guard the unguarded brew call
+
+`install_detect_secrets()`: the `run(["brew", "install", "detect-secrets"])`
+call now lives inside `if brew_available():`. Previously, on a machine
+without Homebrew, this line crashed Spellforge with `FileNotFoundError`
+instead of falling back to pip as intended. The pip-fallback branch now
+also routes through `_pip_install` for isolation.
+
+## 6. Repair mode
+
+New `--repair PATH` flag for fixing an existing project without
+re-bootstrapping it from scratch:
+
+```bash
+# Fix the current service_levels situation
+python3 spellforge.py --repair /Users/tthomas/Documents/Coding/service_levels
+
+# Or, if you suspect the venv itself is corrupt or wrong-version:
+python3 spellforge.py --repair /Users/tthomas/Documents/Coding/service_levels --rebuild-venv
+```
+
+Repair mode runs ONLY: `ensure_python → verify_python → create_venv
+(version-checked) → verify_venv → install_base_packages → verify_packages
+→ write_post_edit_hook → verify_post_edit_hook`.
+
+It does NOT touch: git history, pyproject.toml, CLAUDE.md, docs/, tests/,
+settings.local.json, pre-commit hook, .gitignore, or anything else.
+
+If watchdog is detected in the existing venv, it's automatically added to
+the re-verification set.
+
+## 7. Refactor
+
+The monolithic `__main__` block was extracted into two functions:
+
+- `do_fresh_install()` — the original interactive flow, unchanged in
+  behavior.
+- `do_repair(target_path, rebuild_venv=False)` — the new path.
+
+`__main__` is now just an argparse dispatch. Bare `spellforge.py`
+continues to launch the interactive fresh-install flow — backward-compatible.
+
+## To use right now on service_levels
+
+```bash
+# Run from anywhere — the script is self-contained.
+python3 /path/to/spellforge.py --repair /Users/tthomas/Documents/Coding/service_levels --rebuild-venv
+```
+
+The `--rebuild-venv` is recommended for your current situation since the
+existing venv may have been created with the wrong Python version (or is
+otherwise in a state where ruff didn't land). Repair mode will:
+
+1. Ensure `python3.13` is installed (will `brew install python@3.13` if
+   needed).
+2. Delete the broken `.venv` (because of `--rebuild-venv`).
+3. Create a fresh `.venv` with Python 3.13.
+4. Install all base packages with strict pip isolation.
+5. Verify every single package and CLI tool is actually present, fataling
+   loudly if anything is missing.
+6. Regenerate `.claude/hooks/post_edit.sh` with the correct ruff path.
+7. Print a summary of what was repaired and what was preserved.

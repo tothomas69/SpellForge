@@ -61,7 +61,7 @@ SpellForge walks you through an interactive menu, then installs and configures e
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.13.x (Spellforge pins generated projects to 3.13 and will `brew install python@3.13` if it's missing — see [Why 3.13?](#-why-python-313))
 - An [Anthropic API key](https://console.anthropic.com/)
 
 ### 1. Clone the repo
@@ -97,6 +97,31 @@ pytest tests/ -v
 ```
 
 All tests should be green. This suite checks that every tool was installed correctly, all config files are in place, and your Claude Code environment is properly configured.
+
+---
+
+## 🔧 Repair Mode
+
+If a previously bootstrapped project gets into a bad state — wrong Python version in the venv, missing tools, a broken post-edit hook — you don't have to start over. Run SpellForge in repair mode:
+
+```bash
+# Re-validate and reinstall, keeping the existing venv
+python spellforge.py --repair /path/to/your/project
+
+# Or, if the venv itself is suspect, blow it away and rebuild
+python spellforge.py --repair /path/to/your/project --rebuild-venv
+```
+
+Repair mode only touches the Python interpreter, virtualenv, base packages, and post-edit hook. It deliberately leaves your git history, `pyproject.toml`, `CLAUDE.md`, `docs/`, `tests/`, and any other project files untouched.
+
+---
+
+## 🐍 Why Python 3.13?
+
+SpellForge pins every new project to Python 3.13 instead of using whatever `python3` happens to be on PATH. The reason: `brew install python3` resolves to the *current* formula (3.14 at the time of writing), which is too new for the typical dependency matrix — pandas, pydantic, and other native-extension packages lag behind major releases. 3.13 is the current stable release with broad wheel coverage.
+
+If you need to bump the target version, change the `PYTHON_TARGET_MINOR` constant near the top of `spellforge.py` — every version check in the script reads from it.
+
 ---
 
 ## 🤝 Contributing

@@ -58,3 +58,6 @@ logs/
 
 # Jupyter Notebooks
 .ipynb_checkpoints/
+
+# Local backups of prior bootstrapper versions
+old_spellforge.py
