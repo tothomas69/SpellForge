@@ -17,6 +17,14 @@ Implementation is complete when:
 - Minimum 80% code coverage on every file touched in the commit
 - No formatter, linter, or type checker issues
 
+### Quality Gate
+The quality gate runs as a **git pre-commit hook** (`.git/hooks/pre-commit`), not after every Claude edit:
+- Ruff formats and lints staged Python files (formatting fixes are auto-restaged)
+- detect-secrets scans for new secrets against `.secrets.baseline`
+- Commit is blocked on lint errors or new secrets
+
+Run `pytest tests/ -v` and the coverage report manually — they are intentionally not in the pre-commit hook (too slow to run on every commit). Treat them as the last check before opening a PR.
+
 ### As-Built Project Guide Maintenance
 **NEVER commit to git without first updating `docs/as-built-project-guide.md`** to reflect any changes:
 - New systems, modules, or components added

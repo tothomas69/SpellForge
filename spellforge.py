@@ -472,7 +472,7 @@ def create_venv(project_path: Path, python_bin: str):
 	If an existing venv is the wrong version (e.g. left over from a prior
 	bootstrap that used a different Python), we fatal with instructions to
 	delete and rerun — silently reusing a stale venv is the bug that lets
-	a hardcoded post_edit hook point at a binary that may or may not exist.
+	the pre-commit hook point at a ruff binary that may or may not exist.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -647,8 +647,7 @@ def install_detect_secrets(pip_bin: str):
 				success(f"detect-secrets installed via Homebrew: {detect_secrets_bin}")
 				return detect_secrets_bin
 			warning(
-				"brew install succeeded but detect-secrets not found on PATH - "
-				"falling back to pip."
+				"brew install succeeded but detect-secrets not found on PATH - falling back to pip."
 			)
 		else:
 			warning("Homebrew install failed - falling back to pip install into venv.")
@@ -668,6 +667,34 @@ def install_detect_secrets(pip_bin: str):
 
 	success(f"detect-secrets installed via pip: {detect_secrets_bin}")
 	return detect_secrets_bin
+
+
+def _resolve_detect_secrets_bin(pip_bin: str) -> str:
+	"""
+	Resolve an existing detect-secrets binary path WITHOUT triggering an install.
+
+	Used by repair mode, which assumes the project was bootstrapped before and
+	just needs to point the pre-commit hook at whichever detect-secrets is
+	actually on disk now. Checks Homebrew first (matches install_detect_secrets'
+	preference), then the venv. Fatals if neither exists.
+
+	Args:
+	    pip_bin: Path to the venv pip — used to derive the venv bin directory
+	             where a pip-installed detect-secrets would live.
+	"""
+	brew_path = shutil.which("detect-secrets")
+	if brew_path:
+		return brew_path
+
+	venv_path = str(Path(pip_bin).parent / "detect-secrets")
+	if Path(venv_path).exists():
+		return venv_path
+
+	fatal(
+		"detect-secrets not found on PATH or in the venv. "
+		"Run `spellforge.py` (without --repair) to install it, or "
+		"`brew install detect-secrets` manually."
+	)
 
 
 def init_secrets_baseline(project_path: Path, detect_secrets_bin: str):
@@ -825,7 +852,9 @@ def ensure_node():
 		if result.returncode == 0 and shutil.which("node"):
 			success("Node.js installed!")
 			return
-		warning("Homebrew install failed (corporate Workbrew restrictions?). Try installing Node.js manually.")
+		warning(
+			"Homebrew install failed (corporate Workbrew restrictions?). Try installing Node.js manually."
+		)
 
 	# Brew unavailable or failed - node must be installed manually
 	fatal(
@@ -872,8 +901,7 @@ def create_directory_structure(project_path: Path):
 	"""
 	Create the standard directory structure for a Claude-powered project:
 
-	    .claude/
-	        hooks/        ← post_edit.sh lives here
+	    .claude/                      ← Claude Code config (settings.local.json)
 	    docs/
 	        prd.md                    ← Product Requirements Doc
 	        as-built-project-guide.md ← as-built project guide architecture document
@@ -885,7 +913,7 @@ def create_directory_structure(project_path: Path):
 
 	# Define all directories we need to create
 	directories = [
-		project_path / ".claude" / "hooks",
+		project_path / ".claude",
 		project_path / "docs",
 	]
 
@@ -899,16 +927,17 @@ def create_directory_structure(project_path: Path):
 
 # =============================================================================
 # STEP 9 — WRITE PROJECT FILES
-# Write settings.local.json, post_edit.sh, CLAUDE.md, and docs/ docs.
+# Write settings.local.json, CLAUDE.md, and docs/ docs.
 # All hardcoded paths are replaced with the actual project path at write time.
 # =============================================================================
 
 
 def write_settings_local(project_path: Path):
 	"""
-	Write .claude/settings.local.json with dynamic paths and a clean
-	set of permitted Claude Code commands for a generic Python project.
-	The hook path is set to the actual project location at write time.
+	Write .claude/settings.local.json with a clean set of permitted Claude Code
+	commands for a generic Python project. Quality enforcement (ruff format +
+	check) lives in the git pre-commit hook, not in a PostToolUse hook — that
+	moved out to keep Claude responsive during editing sessions.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -916,7 +945,6 @@ def write_settings_local(project_path: Path):
 	step("⚙️", "Claude Code Settings (settings.local.json)")
 
 	settings_path = project_path / ".claude" / "settings.local.json"
-	hook_path = str(project_path / ".claude" / "hooks" / "post_edit.sh")
 
 	settings = {
 		"permissions": {
@@ -938,27 +966,12 @@ def write_settings_local(project_path: Path):
 				"Bash(grep:*)",
 				"Bash(pgrep:*)",
 				"Bash(ls:*)",
-				# Ruff linting — triggered by the post-edit hook
+				# Ruff — invoked manually by Claude during a session if needed,
+				# and by the pre-commit hook before each commit
 				"Bash(ruff check:*)",
 				"Bash(ruff format:*)",
 				# Allow fetching from GitHub raw content (common for scripts/configs)
 				"WebFetch(domain:raw.githubusercontent.com)",
-			]
-		},
-		"hooks": {
-			"PostToolUse": [
-				{
-					# Trigger after any file write or edit operation
-					"matcher": "Write|Edit|MultiEdit",
-					"hooks": [
-						{
-							"type": "command",
-							# Dynamic path — set to this project's actual location
-							"command": hook_path,
-							"statusMessage": "🔍 Ruff checking for lint...",
-						}
-					],
-				}
 			]
 		},
 	}
@@ -968,88 +981,6 @@ def write_settings_local(project_path: Path):
 
 	settings_path.write_text(json.dumps(settings, indent=2))
 	success(f"Written: {settings_path}")
-	info(f"Hook path set to: {C.YELLOW}{hook_path}{C.RESET}")
-
-
-def write_post_edit_hook(project_path: Path):
-	"""
-	Write the post_edit.sh Claude Code hook into .claude/hooks/.
-	This script runs automatically after Claude edits any Python file,
-	formatting with ruff and surfacing any lint errors immediately.
-	The venv ruff path is set dynamically based on project_path.
-
-	Args:
-	    project_path: The resolved Path to the project root directory.
-	"""
-	step("🪝", "Post-Edit Hook (post_edit.sh)")
-
-	hook_path = project_path / ".claude" / "hooks" / "post_edit.sh"
-	ruff_bin = str(project_path / ".venv" / "bin" / "ruff")
-
-	hook_content = f"""#!/bin/bash
-# =============================================================================
-# .claude/hooks/post_edit.sh — Claude Code post-edit hook
-# =============================================================================
-# Runs automatically after Claude edits a file. Formats and lints any Python
-# file using Ruff so issues are caught during the session, not at commit time.
-#
-# Exit codes:
-#   0 — success or non-Python file (no action needed)
-#   1 — Ruff not found (venv issue)
-#   2 — lint errors found (Claude will see the output and fix them)
-# =============================================================================
-
-# Read JSON input from stdin and extract the edited file path
-file_path=$(cat | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-print(data.get('tool_input', {{}}).get('file_path', ''))
-")
-
-# Nothing to do if no file path was provided
-if [ -z "$file_path" ]; then
-  exit 0
-fi
-
-# Only act on Python files — skip everything else silently
-if ! echo "$file_path" | grep -qE '\\.py$'; then
-  exit 0
-fi
-
-RUFF="{ruff_bin}"
-
-# Bail clearly if Ruff isn't where we expect it — likely a venv setup issue
-if [ ! -x "$RUFF" ]; then
-  echo "⚠ Ruff not found at $RUFF - is the venv set up?" >&2
-  exit 1
-fi
-
-cd "$CLAUDE_PROJECT_DIR" || exit 1
-
-# Format first (silent — formatting changes are not errors)
-"$RUFF" format "$file_path" --quiet 2>/dev/null
-
-# Lint and surface any errors to Claude so it can fix them immediately
-lint_output=$("$RUFF" check "$file_path" 2>&1)
-lint_exit=$?
-
-if [ $lint_exit -ne 0 ]; then
-  echo "$lint_output" >&2
-  exit 2
-fi
-
-exit 0
-"""
-
-	if hook_path.exists():
-		warning("post_edit.sh already exists - overwriting.")
-
-	hook_path.write_text(hook_content)
-
-	# Must be executable for Claude Code to run it as a hook
-	hook_path.chmod(0o755)
-	success(f"Written + chmod 755: {hook_path}")
-	info(f"Ruff path in hook: {C.YELLOW}{ruff_bin}{C.RESET}")
 
 
 def write_claude_md(project_path: Path):
@@ -1083,6 +1014,14 @@ Implementation is complete when:
 - All tests pass - no exceptions, no skipped tests
 - Minimum 80% code coverage on every file touched in the commit
 - No formatter, linter, or type checker issues
+
+### Quality Gate
+The quality gate runs as a **git pre-commit hook** (`.git/hooks/pre-commit`), not after every Claude edit:
+- Ruff formats and lints staged Python files (formatting fixes are auto-restaged)
+- detect-secrets scans for new secrets against `.secrets.baseline`
+- Commit is blocked on lint errors or new secrets
+
+Run `pytest tests/ -v` and the coverage report manually — they are intentionally not in the pre-commit hook (too slow to run on every commit). Treat them as the last check before opening a PR.
 
 ### As-Built Project Guide Maintenance
 **NEVER commit to git without first updating `docs/as-built-project-guide.md`** to reflect any changes:
@@ -1226,25 +1165,33 @@ def write_agent_docs(project_path: Path):
 
 
 # =============================================================================
-# STEP 10 — GIT PRE-COMMIT HOOK FOR SECRET SCANNING
-# Installs a pre-commit hook that runs detect-secrets before every commit
-# so secrets never accidentally make it into the git history.
+# STEP 10 — GIT PRE-COMMIT HOOK (RUFF + SECRET SCANNING)
+# Installs a pre-commit hook that runs ruff format + check on staged Python
+# files and then scans for secrets. This is the project's quality gate —
+# nothing lands in git history without passing it.
 # =============================================================================
 
 
 def write_precommit_hook(project_path: Path, detect_secrets_bin: str):
 	"""
-	Write a git pre-commit hook that runs detect-secrets before every commit.
-	The hook blocks the commit and shows a warning if new secrets are detected.
+	Write a git pre-commit hook that enforces the project's quality gate
+	before each commit. Two stages, in order:
+
+	1. Ruff format + lint on staged Python files (formatting fixes are
+	   auto-restaged so the commit captures them).
+	2. detect-secrets scan against the baseline.
+
+	The hook blocks the commit on either ruff lint errors or new secrets.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	    detect_secrets_bin: Path to the detect-secrets executable.
 	"""
-	step("🔐", "Git Pre-Commit Secret Scanning Hook")
+	step("🔐", "Git Pre-Commit Hook (ruff + secret scanning)")
 
 	hooks_dir = project_path / ".git" / "hooks"
 	precommit_path = hooks_dir / "pre-commit"
+	ruff_bin = str(project_path / ".venv" / "bin" / "ruff")
 
 	if not hooks_dir.exists():
 		# Should not happen if git init ran, but guard just in case
@@ -1252,21 +1199,58 @@ def write_precommit_hook(project_path: Path, detect_secrets_bin: str):
 
 	precommit_content = """#!/bin/bash
 # =============================================================================
-# .git/hooks/pre-commit — Secret scanning hook
+# .git/hooks/pre-commit — Quality + secret-scanning gate
 # =============================================================================
-# Runs detect-secrets before every git commit to prevent secrets (API keys,
-# passwords, tokens) from being accidentally committed to the repository.
+# Runs before every git commit. Two stages, in order:
+#   1. Ruff format + lint on staged .py files (auto-restages formatting fixes)
+#   2. detect-secrets scan against the baseline
 #
-# To update the baseline after intentionally adding a known value:
+# To update the secrets baseline after intentionally adding a known value:
 #   detect-secrets scan > .secrets.baseline
 #
 # Exit codes:
-#   0 — no new secrets detected, commit proceeds
-#   1 — new secrets detected, commit is blocked
+#   0 — all checks passed, commit proceeds
+#   1 — a check failed, commit is blocked
 # =============================================================================
 
+RUFF="__RUFF_BIN__"
 DETECT_SECRETS="__DETECT_SECRETS_BIN__"
 BASELINE=".secrets.baseline"
+
+# -----------------------------------------------------------------------------
+# Stage 1 — Ruff format + lint on staged Python files
+# -----------------------------------------------------------------------------
+
+# Collect staged .py paths (Added, Copied, Modified). --diff-filter avoids
+# deletes that would error on ruff.
+staged_py=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\.py$' || true)
+
+if [ -n "$staged_py" ]; then
+  if [ ! -x "$RUFF" ]; then
+    echo "⚠  Ruff not found at $RUFF — is the venv set up?" >&2
+    echo "⚠  Skipping ruff checks. Install ruff to enable." >&2
+  else
+    echo "🎨 Ruff format on staged files..."
+    # shellcheck disable=SC2086
+    "$RUFF" format $staged_py --quiet
+    # Restage anything ruff just reformatted so the commit captures the fixes
+    # shellcheck disable=SC2086
+    git add $staged_py
+
+    echo "🔍 Ruff check on staged files..."
+    # shellcheck disable=SC2086
+    if ! "$RUFF" check $staged_py; then
+      echo "" >&2
+      echo "🚨 Ruff lint errors found. Commit blocked." >&2
+      echo "   Fix the issues above, then re-stage and re-commit." >&2
+      exit 1
+    fi
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# Stage 2 — detect-secrets scan
+# -----------------------------------------------------------------------------
 
 # Warn but allow commit if detect-secrets isn't installed
 if [ ! -x "$DETECT_SECRETS" ]; then
@@ -1324,10 +1308,13 @@ exit 0
 	if precommit_path.exists():
 		warning("pre-commit hook already exists - overwriting.")
 
+	precommit_content = precommit_content.replace("__RUFF_BIN__", ruff_bin)
 	precommit_content = precommit_content.replace("__DETECT_SECRETS_BIN__", detect_secrets_bin)
 	precommit_path.write_text(precommit_content)
 	precommit_path.chmod(0o755)
 	success(f"Written + chmod 755: {precommit_path}")
+	info(f"Ruff path in hook:           {C.YELLOW}{ruff_bin}{C.RESET}")
+	info(f"detect-secrets path in hook: {C.YELLOW}{detect_secrets_bin}{C.RESET}")
 
 
 # =============================================================================
@@ -1365,11 +1352,10 @@ def print_summary(project_path: Path):
   {C.GREEN}✔{C.RESET}  tests/ directory (conftest.py + placeholder test)
   {C.GREEN}✔{C.RESET}  detect-secrets + .secrets.baseline
   {C.GREEN}✔{C.RESET}  Claude Code (global npm install)
-  {C.GREEN}✔{C.RESET}  .claude/settings.local.json (permissions + hook)
-  {C.GREEN}✔{C.RESET}  .claude/hooks/post_edit.sh (auto lint on file edit)
+  {C.GREEN}✔{C.RESET}  .claude/settings.local.json (Claude Code permissions)
   {C.GREEN}✔{C.RESET}  CLAUDE.md (Claude Code project context)
   {C.GREEN}✔{C.RESET}  docs/ (prd.md, as-built-project-guide.md)
-  {C.GREEN}✔{C.RESET}  .git/hooks/pre-commit (secret scanning before commit)
+  {C.GREEN}✔{C.RESET}  .git/hooks/pre-commit (ruff format/check + secret scanning before commit)
 
 {C.BOLD}Next steps:{C.RESET}
   1. {C.CYAN}cd {project_path}{C.RESET}
@@ -2097,7 +2083,7 @@ def verify_directory_structure(project_path: Path):
 	    project_path: The resolved Path to the project root directory.
 	"""
 	required_dirs = [
-		project_path / ".claude" / "hooks",
+		project_path / ".claude",
 		project_path / "docs",
 	]
 
@@ -2111,8 +2097,9 @@ def verify_directory_structure(project_path: Path):
 
 def verify_settings_local(project_path: Path):
 	"""
-	Confirm settings.local.json exists, is valid JSON, and contains
-	the required 'permissions' and 'hooks' top-level keys.
+	Confirm settings.local.json exists, is valid JSON, and contains the
+	required 'permissions' top-level key. (Hooks are no longer configured
+	here — quality enforcement lives in the git pre-commit hook.)
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -2127,49 +2114,10 @@ def verify_settings_local(project_path: Path):
 	except json.JSONDecodeError as parse_error:
 		fatal(f"settings.local.json verification failed - invalid JSON: {parse_error}")
 
-	for required_key in ["permissions", "hooks"]:
-		if required_key not in parsed:
-			fatal(f"settings.local.json verification failed - missing key: '{required_key}'")
+	if "permissions" not in parsed:
+		fatal("settings.local.json verification failed - missing key: 'permissions'")
 
-	# Confirm the hook command path actually points to our post_edit.sh
-	hook_path = project_path / ".claude" / "hooks" / "post_edit.sh"
-	hooks = parsed.get("hooks", {}).get("PostToolUse", [])
-	hook_commands = [h.get("command", "") for entry in hooks for h in entry.get("hooks", [])]
-
-	if not any(str(hook_path) in cmd for cmd in hook_commands):
-		fatal(
-			f"settings.local.json verification failed - hook command doesn't reference {hook_path}"
-		)
-
-	success("✔ Verified settings.local.json (valid JSON, hooks + permissions present)")
-
-
-def verify_post_edit_hook(project_path: Path):
-	"""
-	Confirm post_edit.sh exists, is executable, and references the correct
-	ruff binary path for this project's venv.
-
-	Args:
-	    project_path: The resolved Path to the project root directory.
-	"""
-	hook_path = project_path / ".claude" / "hooks" / "post_edit.sh"
-	ruff_bin = project_path / ".venv" / "bin" / "ruff"
-
-	if not hook_path.exists():
-		fatal(f"post_edit.sh verification failed - file not found: {hook_path}")
-
-	if not os.access(hook_path, os.X_OK):
-		fatal(f"post_edit.sh verification failed - file is not executable: {hook_path}")
-
-	# Confirm the hook contains a reference to this project's ruff binary
-	content = hook_path.read_text()
-	if str(ruff_bin) not in content:
-		fatal(
-			f"post_edit.sh verification failed - ruff path '{ruff_bin}' "
-			f"not found in hook script. The hook may point to the wrong project."
-		)
-
-	success("✔ Verified post_edit.sh (exists, executable, correct ruff path)")
+	success("✔ Verified settings.local.json (valid JSON, permissions present)")
 
 
 def verify_claude_md(project_path: Path):
@@ -2230,13 +2178,15 @@ def verify_agent_docs(project_path: Path):
 
 def verify_precommit_hook(project_path: Path):
 	"""
-	Confirm the git pre-commit hook exists, is executable, and references
-	the detect-secrets binary so secret scanning will actually run.
+	Confirm the git pre-commit hook exists, is executable, and references both
+	the project's venv ruff and the detect-secrets binary so the quality gate
+	will actually run.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	"""
 	hook_path = project_path / ".git" / "hooks" / "pre-commit"
+	venv_ruff = project_path / ".venv" / "bin" / "ruff"
 
 	if not hook_path.exists():
 		fatal(f"Pre-commit hook verification failed - file not found: {hook_path}")
@@ -2244,12 +2194,23 @@ def verify_precommit_hook(project_path: Path):
 	if not os.access(hook_path, os.X_OK):
 		fatal(f"Pre-commit hook verification failed - file is not executable: {hook_path}")
 
-	# Confirm detect-secrets is referenced so we know scanning will actually run
 	content = hook_path.read_text()
+
+	# Confirm ruff is referenced (and points at this project's venv) so we
+	# know the format/lint stage will actually run.
+	if "ruff" not in content:
+		fatal("Pre-commit hook verification failed - 'ruff' not referenced in hook.")
+	if str(venv_ruff) not in content:
+		fatal(
+			f"Pre-commit hook verification failed - ruff path '{venv_ruff}' "
+			f"not found in hook. Hook may point at the wrong project."
+		)
+
+	# Confirm detect-secrets is referenced so the secret-scanning stage runs
 	if "detect-secrets" not in content:
 		fatal("Pre-commit hook verification failed - 'detect-secrets' not referenced in hook.")
 
-	success("✔ Verified pre-commit hook (exists, executable, detect-secrets referenced)")
+	success("✔ Verified pre-commit hook (exists, executable, ruff + detect-secrets referenced)")
 
 
 # =============================================================================
@@ -2591,8 +2552,6 @@ def do_fresh_install():
 	verify_directory_structure(project_path)
 	write_settings_local(project_path)
 	verify_settings_local(project_path)
-	write_post_edit_hook(project_path)
-	verify_post_edit_hook(project_path)
 	write_claude_md(project_path)
 	verify_claude_md(project_path)
 	write_agent_docs(project_path)
@@ -2622,12 +2581,12 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	Repair an existing Spellforge-managed project.
 
 	Re-validates the pinned Python, ensures the venv is correct (optionally
-	rebuilding it), reinstalls base packages with strict isolation,
-	regenerates the post-edit hook, and runs the full verification suite.
+	rebuilding it), reinstalls base packages with strict isolation, and
+	regenerates the git pre-commit hook (which runs ruff + detect-secrets).
 
 	Does NOT touch: git history, pyproject.toml, .claude/settings.local.json,
-	CLAUDE.md, docs/, tests/, .gitignore, pre-commit hook, or any other
-	project content. This is strictly a "my tooling is broken, fix it" path.
+	CLAUDE.md, docs/, tests/, .gitignore, or any other project content.
+	This is strictly a "my tooling is broken, fix it" path.
 
 	Args:
 	    target_path: Path to an existing project root.
@@ -2676,19 +2635,19 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	install_base_packages(pip_bin, target_path)
 	verify_packages(target_path)
 
-	# ── Regenerate the post-edit hook ─────────────────────────────────────────
-	# This is the whole point of repair mode — if the hook is pointing at a
-	# missing ruff, regenerating it after fixing the venv puts everything
-	# back in sync. (The hook content is path-derived so it's safe to
-	# overwrite even if the user manually customized it; we warn first.)
-	hook_path = target_path / ".claude" / "hooks" / "post_edit.sh"
+	# ── Regenerate the pre-commit hook ────────────────────────────────────────
+	# Re-point the pre-commit hook at the current venv's ruff and at whichever
+	# detect-secrets is on the system. This is the whole point of repair mode:
+	# if the hook is pointing at a missing binary after a venv rebuild,
+	# regenerating it puts the quality gate back in working order. The hook
+	# content is path-derived so it's safe to overwrite even if the user
+	# manually customized it; we warn first.
+	detect_secrets_bin = _resolve_detect_secrets_bin(pip_bin)
+	hook_path = target_path / ".git" / "hooks" / "pre-commit"
 	if hook_path.exists():
 		info(f"Overwriting existing hook: {hook_path}")
-	else:
-		# Ensure parent dirs exist for a project that maybe never had a hook
-		hook_path.parent.mkdir(parents=True, exist_ok=True)
-	write_post_edit_hook(target_path)
-	verify_post_edit_hook(target_path)
+	write_precommit_hook(target_path, detect_secrets_bin)
+	verify_precommit_hook(target_path)
 
 	# ── Summary ───────────────────────────────────────────────────────────────
 	step("✅", "Repair complete")
@@ -2696,10 +2655,10 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	info("What was repaired:")
 	info(f"  • Python {PYTHON_TARGET_LABEL} confirmed at {python_bin}")
 	info(f"  • Venv validated and base packages reinstalled at {venv_path}")
-	info(f"  • Post-edit hook regenerated at {hook_path}")
+	info(f"  • Pre-commit hook regenerated at {hook_path}")
 	info("What was NOT touched:")
 	info("  • git history, pyproject.toml, CLAUDE.md, docs/, tests/")
-	info("  • settings.local.json, pre-commit hook, .gitignore")
+	info("  • settings.local.json, .gitignore")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -2726,7 +2685,8 @@ def _parse_args() -> argparse.Namespace:
 			"Repair an existing Spellforge-managed project at PATH. "
 			"Re-validates Python, rebuilds the venv if needed, reinstalls "
 			"base packages with strict pip isolation, and regenerates the "
-			"post-edit hook. Does not touch git, docs, or project config."
+			"git pre-commit hook (ruff + detect-secrets). Does not touch "
+			"git history, docs, or project config."
 		),
 	)
 	parser.add_argument(
