@@ -1648,6 +1648,10 @@ def verify_tests_directory(project_path: Path):
 	"""
 	Confirm the tests/ directory and its required files were created correctly.
 
+	Accepts either the freshly created placeholder OR any pre-existing test_*.py
+	file, so re-bootstrapping a project whose placeholder has been replaced by
+	real tests does not fail verification.
+
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	"""
@@ -1656,12 +1660,20 @@ def verify_tests_directory(project_path: Path):
 	if not tests_path.exists() or not tests_path.is_dir():
 		fatal(f"Tests directory verification failed - {tests_path} not found.")
 
-	required_files = ["__init__.py", "conftest.py", "test_placeholder.py"]
-	for filename in required_files:
+	for filename in ["__init__.py", "conftest.py"]:
 		file_path = tests_path / filename
 		if not file_path.exists():
 			fatal(f"Tests directory verification failed - missing: {file_path}")
 		success(f"✔ Verified test file: tests/{filename}")
+
+	test_files = sorted(tests_path.glob("test_*.py"))
+	if not test_files:
+		fatal(
+			f"Tests directory verification failed - no test_*.py files found in {tests_path}. "
+			"Expected test_placeholder.py or at least one real test file."
+		)
+	for test_file in test_files:
+		success(f"✔ Verified test file: tests/{test_file.name}")
 
 
 # =============================================================================
@@ -1703,9 +1715,13 @@ def install_bandit(pip_bin: str, project_path: Path):
 		'skips = ["B101"]  # B101 = assert used - fine in non-production code\n'
 	)
 	if pyproject_path.exists():
-		with pyproject_path.open("a") as f:
-			f.write(bandit_config)
-		success(f"Bandit config appended to {pyproject_path}")
+		existing = pyproject_path.read_text()
+		if "[tool.bandit]" in existing:
+			warning("pyproject.toml already contains [tool.bandit] - skipping.")
+		else:
+			with pyproject_path.open("a") as f:
+				f.write(bandit_config)
+			success(f"Bandit config appended to {pyproject_path}")
 
 	verify_bandit(pip_bin)
 
