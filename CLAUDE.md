@@ -4,7 +4,7 @@ This file provides essential context for Claude Code when working on this projec
 ## Project Documentation
 The following files contain critical project information:
 - @docs/prd.md - Product Requirements Document with goals, features, and technical requirements
-- @docs/as-built-project-guide.md - Combined discovery and architecture guide. **Read this before implementing new functionality** to find what already exists.
+- @docs/as-built-project-guide.md - Combined discovery and architecture guide. **Read this before implementing anything new** to find what already exists, understand architecture decisions, and follow established patterns.
 
 ## Development Environment
 **Platform**: macOS
@@ -33,7 +33,7 @@ Run `pytest tests/ -v` and the coverage report manually — they are intentional
 - New settings categories or key functions
 
 This is a **hard requirement**. If you added, removed, or modified any server systems, components, API endpoints, or settings, the as-built project guide **MUST** be updated in the same commit.
-**Before updating the as-built project guide**, read the maintenance instructions at the top of `docs/as-built-project-guide.md` for guidance on what to include.
+**Before updating the as-built project guide**, read `docs/as-built-project-guide.md` for guidance on what to include and how to maintain consistency.
 The as-built project guide is the primary discovery document for finding existing functionality. Keeping it current prevents duplicate implementations and helps integrate with existing patterns.
 
 ## Coding Guidelines
