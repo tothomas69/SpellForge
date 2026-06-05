@@ -100,6 +100,25 @@ def fatal(message):
 	sys.exit(1)
 
 
+def press_any_key(prompt: str = "  Press any key to continue..."):
+	"""
+	Wait for a single keypress without requiring Enter.
+	Uses raw terminal mode so any key advances the screen.
+	"""
+	import termios
+	import tty
+
+	print(f"\n{C.BLUE}{prompt}{C.RESET}", end="", flush=True)
+	fd = sys.stdin.fileno()
+	old_settings = termios.tcgetattr(fd)
+	try:
+		tty.setraw(fd)
+		sys.stdin.read(1)
+	finally:
+		termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+	print()
+
+
 # =============================================================================
 # SHELL COMMAND RUNNER
 # Wraps subprocess so we get consistent output and error handling.
@@ -1060,6 +1079,20 @@ The as-built project guide is the primary discovery document for finding existin
 - Internal functions and classes should throw unrecoverable errors and let them bubble up
 - UI components should catch all errors and display them to the user
 
+## Working Practices
+
+### Permissions
+- **PREFER "this session only"** when granting tool permissions at runtime. Do not add permanent allow rules to settings files unless the user explicitly requests it.
+
+### Branch Strategy
+- **ALWAYS create a new branch** before starting work on any new feature, fix, or task. Never commit to `main` or the current branch without asking first.
+- Use descriptive branch names that reflect the work (e.g., `fix/auth-timeout`, `feat/user-profile`).
+
+### Pull Requests
+- **ALWAYS keep PRs focused on a single function, feature, or fix.** Never bundle unrelated changes in one PR.
+- When a task grows beyond a single concern, pause and tell the user before continuing.
+- Remind the user to split broad changes into separate PRs when appropriate.
+
 ## Time Handling
 ### Storage and Internal Processing
 - **Use UTC for most internal storage** - Timestamps in the database, logs, and internal APIs should use UTC
@@ -1335,6 +1368,7 @@ def print_summary(project_path: Path):
 	venv_ruff = project_path / ".venv" / "bin" / "ruff"
 	venv_python = project_path / ".venv" / "bin" / "python3"
 
+	# ── Page 1: what was installed ───────────────────────────────────────────
 	print(f"""
 {C.GREEN}{C.BOLD}╔══════════════════════════════════════════════════════════╗
 ║              ✅  Project Bootstrap Complete!              ║
@@ -1356,7 +1390,13 @@ def print_summary(project_path: Path):
   {C.GREEN}✔{C.RESET}  CLAUDE.md (Claude Code project context)
   {C.GREEN}✔{C.RESET}  docs/ (prd.md, as-built-project-guide.md)
   {C.GREEN}✔{C.RESET}  .git/hooks/pre-commit (ruff format/check + secret scanning before commit)
+""")
 
+	press_any_key("  Press any key for next steps...")
+	print("\033[2J\033[H", end="")
+
+	# ── Page 2: next steps and useful paths ──────────────────────────────────
+	print(f"""
 {C.BOLD}Next steps:{C.RESET}
   1. {C.CYAN}cd {project_path}{C.RESET}
   2. {C.CYAN}source .venv/bin/activate{C.RESET}   ← activate your virtual environment
@@ -2295,7 +2335,7 @@ TOOL_MANIFEST = [
 		True,
 		"Python Linter/Formatter",
 		"Extremely fast Python linter and formatter",
-		"Enforces the coding standards in CLAUDE.md. Runs automatically after every Claude Code edit.",
+		"Enforces the coding standards in CLAUDE.md. Runs as part of the git pre-commit hook.",
 	),
 	(
 		"detect-secrets",
@@ -2379,6 +2419,12 @@ def show_installation_menu() -> InstallChoices:
 		print(
 			f"  {C.YELLOW}★{C.RESET} {C.BOLD}{name:<22}{C.RESET} {C.YELLOW}{category:<26}{C.RESET} {why}"
 		)
+
+	press_any_key("  Press any key to continue to optional tools...")
+
+	# Clear screen before the optional tools section for a fresh view
+	print("\033[2J\033[H", end="")
+	banner()
 
 	# ── Prompt for optional tools ─────────────────────────────────────────────
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")

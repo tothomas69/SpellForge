@@ -62,6 +62,20 @@ The as-built project guide is the primary discovery document for finding existin
 - Internal functions and classes should throw unrecoverable errors and let them bubble up
 - UI components should catch all errors and display them to the user
 
+## Working Practices
+
+### Permissions
+- **PREFER "this session only"** when granting tool permissions at runtime. Do not add permanent allow rules to settings files unless the user explicitly requests it.
+
+### Branch Strategy
+- **ALWAYS create a new branch** before starting work on any new feature, fix, or task. Never commit to `main` or the current branch without asking first.
+- Use descriptive branch names that reflect the work (e.g., `fix/auth-timeout`, `feat/user-profile`).
+
+### Pull Requests
+- **ALWAYS keep PRs focused on a single function, feature, or fix.** Never bundle unrelated changes in one PR.
+- When a task grows beyond a single concern, pause and tell the user before continuing.
+- Remind the user to split broad changes into separate PRs when appropriate.
+
 ## Time Handling
 ### Storage and Internal Processing
 - **Use UTC for most internal storage** - Timestamps in the database, logs, and internal APIs should use UTC
