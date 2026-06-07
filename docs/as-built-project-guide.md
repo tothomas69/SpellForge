@@ -56,7 +56,7 @@ Single-file script that orchestrates all project setup. Two run modes, dispatche
 
 **Key functions:**
 - `show_installation_menu()` — Presents the interactive menu (paginated: required tools page → optional tools page → confirmation) and returns an `InstallChoices` instance
-- `print_summary()` — Paginated final summary: page 1 shows what was installed, page 2 shows next steps and useful paths
+- `print_summary()` — Paginated final summary: page 1 shows what was installed, page 2 shows next steps, a "Testing setup required" notice (pytest is not automatic; user must replace placeholder, narrow `--cov`, and add CI), and useful paths
 - `press_any_key(prompt)` — UI helper that waits for a single keypress (raw terminal mode) to advance between pages
 - `banner()` — Clears the screen and prints the Spellforge header
 - `ensure_*()` — Verify a tool is installed, install it if missing (e.g., `ensure_homebrew()`, `ensure_python()`)

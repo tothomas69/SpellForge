@@ -372,7 +372,13 @@ class TestToolManifest:
 
 	def test_required_tools_include_core_set(self):
 		required = {name for name, req, *_ in spellforge.TOOL_MANIFEST if req}
-		for tool in ("Git", "Python 3", "Claude Code", "Ruff", "detect-secrets"):
+		for tool in (
+			"Git",
+			f"Python {spellforge.PYTHON_TARGET_LABEL}",
+			"Claude Code",
+			"Ruff",
+			"detect-secrets",
+		):
 			assert tool in required, f"{tool!r} must be marked required in TOOL_MANIFEST"
 
 	def test_optional_tools_include_frontend_set(self):
