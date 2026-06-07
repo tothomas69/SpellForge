@@ -171,23 +171,25 @@ def get_project_path():
 	step("📁", "Project Location")
 
 	home = Path.home()
+	cwd = Path.cwd()
 	print(f"""
   {C.WHITE}Where should your new project live?{C.RESET}
-  {C.BLUE}Enter an absolute path, a ~ path, or a name/relative path (resolved from your home directory).{C.RESET}
-  {C.BLUE}Example: ~/Developer/my_project  or  my_project (creates {home}/my_project){C.RESET}
+  {C.BLUE}Press Enter to use the current directory, or enter a path.{C.RESET}
+  {C.BLUE}  /absolute/path  |  ~/relative/to/home  |  name (creates {home}/name){C.RESET}
+  {C.BLUE}Note: ~ expands to {home} — do not repeat your username after it.{C.RESET}
 """)
 
 	while True:
-		# Prompt for input
-		raw = input(f"  {C.BOLD}{C.MAGENTA}➜ Project path: {C.RESET}").strip()
+		raw = input(
+			f"  {C.BOLD}{C.MAGENTA}➜ Project path [{C.RESET}{C.YELLOW}{cwd}{C.RESET}{C.MAGENTA}]: {C.RESET}"
+		).strip()
 
+		# Empty input → use current directory (no further confirmation needed)
 		if not raw:
-			warning("Path cannot be empty. Please try again.")
-			continue
+			success(f"Using current directory: {C.YELLOW}{cwd}{C.RESET}")
+			return cwd
 
-		# Expand ~ first, then resolve absolute paths as-is.
-		# Resolve relative paths against home so "my_project" → ~/my_project,
-		# which matches the stated prompt behavior.
+		# ~ paths and absolute paths resolve as-is; bare names resolve from home.
 		expanded = Path(raw).expanduser()
 		path = expanded if expanded.is_absolute() else (home / expanded).resolve()
 		info(f"Resolved path: {C.YELLOW}{path}{C.RESET}")
@@ -1205,22 +1207,36 @@ def write_agent_docs(project_path: Path):
 # =============================================================================
 
 
-def write_precommit_hook(project_path: Path, detect_secrets_bin: str):
+def write_precommit_hook(
+	project_path: Path,
+	detect_secrets_bin: str,
+	install_eslint: bool = False,
+	install_prettier: bool = False,
+):
 	"""
 	Write a git pre-commit hook that enforces the project's quality gate
-	before each commit. Two stages, in order:
+	before each commit. Stages run in order:
 
-	1. Ruff format + lint on staged Python files (formatting fixes are
-	   auto-restaged so the commit captures them).
-	2. detect-secrets scan against the baseline.
+	1. Ruff format + lint on staged Python files (always).
+	2. ESLint --fix on staged JS/TS files (when install_eslint=True).
+	3. Prettier --write on staged frontend files (when install_prettier=True).
+	4. detect-secrets scan against the baseline (always).
 
-	The hook blocks the commit on either ruff lint errors or new secrets.
+	The hook blocks the commit on ruff lint errors, unfixable ESLint errors,
+	or new secrets. Prettier never blocks — it just formats and re-stages.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	    detect_secrets_bin: Path to the detect-secrets executable.
+	    install_eslint: Include the ESLint stage.
+	    install_prettier: Include the Prettier stage.
 	"""
-	step("🔐", "Git Pre-Commit Hook (ruff + secret scanning)")
+	label_parts = ["ruff", "secrets"]
+	if install_eslint:
+		label_parts.insert(1, "eslint")
+	if install_prettier:
+		label_parts.insert(-1, "prettier")
+	step("🔐", f"Git Pre-Commit Hook ({' + '.join(label_parts)})")
 
 	hooks_dir = project_path / ".git" / "hooks"
 	precommit_path = hooks_dir / "pre-commit"
@@ -1230,13 +1246,73 @@ def write_precommit_hook(project_path: Path, detect_secrets_bin: str):
 		# Should not happen if git init ran, but guard just in case
 		fatal(f".git/hooks directory not found at {hooks_dir} - was git init run?")
 
-	precommit_content = """#!/bin/bash
+	_eslint_section = (
+		"""
+# -----------------------------------------------------------------------------
+# Stage — ESLint fix + lint on staged JS/TS files
+# -----------------------------------------------------------------------------
+
+staged_js=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\.(js|ts|jsx|tsx|vue)$' || true)
+
+if [ -n "$staged_js" ]; then
+  if ! command -v eslint &>/dev/null; then
+    echo "⚠  eslint not found on PATH — skipping JS/TS lint." >&2
+  else
+    echo "🔧 ESLint --fix on staged files..."
+    # shellcheck disable=SC2086
+    eslint --fix $staged_js 2>/dev/null; eslint_exit=$?
+    # Restage any auto-fixes before potentially blocking
+    # shellcheck disable=SC2086
+    git add $staged_js
+
+    if [ $eslint_exit -ne 0 ]; then
+      echo "" >&2
+      echo "🚨 ESLint errors remain after auto-fix. Commit blocked." >&2
+      echo "   Fix the issues above, then re-stage and re-commit." >&2
+      exit 1
+    fi
+  fi
+fi
+"""
+		if install_eslint
+		else ""
+	)
+
+	_prettier_section = (
+		"""
+# -----------------------------------------------------------------------------
+# Stage — Prettier format on staged frontend files
+# -----------------------------------------------------------------------------
+
+staged_fmt=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\.(js|ts|jsx|tsx|vue|css|scss|html|json|md)$' || true)
+
+if [ -n "$staged_fmt" ]; then
+  if ! command -v prettier &>/dev/null; then
+    echo "⚠  prettier not found on PATH — skipping format." >&2
+  else
+    echo "✨ Prettier --write on staged files..."
+    # shellcheck disable=SC2086
+    prettier --write $staged_fmt --log-level warn
+    # shellcheck disable=SC2086
+    git add $staged_fmt
+  fi
+fi
+"""
+		if install_prettier
+		else ""
+	)
+
+	precommit_content = (
+		"""#!/bin/bash
 # =============================================================================
 # .git/hooks/pre-commit — Quality + secret-scanning gate
 # =============================================================================
-# Runs before every git commit. Two stages, in order:
+# Runs before every git commit. Stages, in order:
 #   1. Ruff format + lint on staged .py files (auto-restages formatting fixes)
-#   2. detect-secrets scan against the baseline
+#   2. ESLint --fix on staged JS/TS files (auto-restages fixes, blocks on errors)
+#   3. Prettier --write on staged frontend files (auto-restages)
+#   4. detect-secrets scan against the baseline
+# Inactive stages are omitted — only installed tools run.
 #
 # To update the secrets baseline after intentionally adding a known value:
 #   detect-secrets scan > .secrets.baseline
@@ -1251,7 +1327,7 @@ DETECT_SECRETS="__DETECT_SECRETS_BIN__"
 BASELINE=".secrets.baseline"
 
 # -----------------------------------------------------------------------------
-# Stage 1 — Ruff format + lint on staged Python files
+# Stage — Ruff format + lint on staged Python files
 # -----------------------------------------------------------------------------
 
 # Collect staged .py paths (Added, Copied, Modified). --diff-filter avoids
@@ -1280,9 +1356,12 @@ if [ -n "$staged_py" ]; then
     fi
   fi
 fi
-
+"""
+		+ _eslint_section
+		+ _prettier_section
+		+ """
 # -----------------------------------------------------------------------------
-# Stage 2 — detect-secrets scan
+# Stage — detect-secrets scan
 # -----------------------------------------------------------------------------
 
 # Warn but allow commit if detect-secrets isn't installed
@@ -1337,6 +1416,7 @@ fi
 echo "\u2714  No new secrets detected."
 exit 0
 """
+	)
 
 	if precommit_path.exists():
 		warning("pre-commit hook already exists - overwriting.")
@@ -1347,6 +1427,10 @@ exit 0
 	precommit_path.chmod(0o755)
 	success(f"Written + chmod 755: {precommit_path}")
 	info(f"Ruff path in hook:           {C.YELLOW}{ruff_bin}{C.RESET}")
+	if install_eslint:
+		info(f"ESLint stage:                {C.YELLOW}enabled (uses eslint on PATH){C.RESET}")
+	if install_prettier:
+		info(f"Prettier stage:              {C.YELLOW}enabled (uses prettier on PATH){C.RESET}")
 	info(f"detect-secrets path in hook: {C.YELLOW}{detect_secrets_bin}{C.RESET}")
 
 
@@ -1404,6 +1488,15 @@ def print_summary(project_path: Path):
   4. {C.CYAN}claude{C.RESET}                       ← start a Claude Code session
   5. Fill in {C.YELLOW}docs/prd.md{C.RESET} with your project goals
   6. Fill in {C.YELLOW}docs/as-built-project-guide.md{C.RESET} as you build
+
+{C.YELLOW}{C.BOLD}Testing setup required:{C.RESET}
+  The pre-commit hook runs Ruff + secret scanning only — pytest never fires on commit.
+  To make the 80% coverage gate meaningful:
+
+  a. Replace {C.YELLOW}tests/test_placeholder.py{C.RESET} with real tests for your code
+  b. Narrow coverage in pyproject.toml: change {C.CYAN}--cov=.{C.RESET} → {C.CYAN}--cov=<your-module>{C.RESET}
+  c. Run {C.CYAN}pytest tests/ -v{C.RESET} manually before opening each PR
+  d. Add CI (e.g. GitHub Actions) to enforce coverage automatically on push
 
 {C.BOLD}Useful paths:{C.RESET}
   Python:  {C.YELLOW}{venv_python}{C.RESET}
@@ -2307,7 +2400,7 @@ TOOL_MANIFEST = [
 		True,
 		"Package Manager",
 		"The macOS package manager (used if available)",
-		"Used to install git and Node.js if not already present. Falls back to alternative methods if not available - safe for corporate environments.",
+		"Used to install git and Node.js if not already present. Falls back to alternative methods if not available.",
 	),
 	(
 		"Git",
@@ -2317,7 +2410,7 @@ TOOL_MANIFEST = [
 		"Tracks all changes, enables collaboration, and anchors the pre-commit secret scanning hook.",
 	),
 	(
-		"Python 3",
+		f"Python {PYTHON_TARGET_LABEL}",
 		True,
 		"Runtime",
 		"Python language runtime",
@@ -2404,13 +2497,13 @@ def show_installation_menu() -> InstallChoices:
 {C.CYAN}{C.BOLD}  Installation Menu
   {"=" * 58}{C.RESET}
   {C.WHITE}Here is everything Spellforge will set up.{C.RESET}
-  {C.BLUE}Required tools are installed automatically.{C.RESET}
+  {C.BLUE}Required tools are installed automatically if not already present.{C.RESET}
   {C.BLUE}Optional tools are your choice - each is explained below.{C.RESET}
 """)
 
 	# ── Display required tools (read-only, no prompt) ─────────────────────────
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
-	print(f"  {C.BOLD}  REQUIRED  (installed automatically){C.RESET}")
+	print(f"  {C.BOLD}  REQUIRED  (installed if not already present){C.RESET}")
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
 
 	for name, required, category, description, why in TOOL_MANIFEST:
@@ -2454,7 +2547,7 @@ def show_installation_menu() -> InstallChoices:
 
 		status = (
 			f"{C.GREEN}yes - will install{C.RESET}"
-			if answer == "y"
+			if answer in ("y", "")
 			else f"{C.YELLOW}no - skipping{C.RESET}"
 		)
 		print(f"     {status}")
@@ -2517,11 +2610,9 @@ def do_fresh_install():
 	ensure_homebrew()
 	verify_homebrew()
 
-	# ── Git install + repo init ───────────────────────────────────────────────
+	# ── Git install (repo init happens after all project files are written) ───
 	ensure_git()
 	verify_git()
-	init_git_repo(project_path)
-	verify_git_repo(project_path)
 
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
@@ -2630,8 +2721,19 @@ def do_fresh_install():
 	create_tests_directory(project_path)
 	verify_tests_directory(project_path)
 
+	# ── Git repo init (after all project files + .gitignore are in place) ────
+	# Initializing here means git status is immediately clean — .venv/ and all
+	# generated files are already covered by .gitignore before git ever sees them.
+	init_git_repo(project_path)
+	verify_git_repo(project_path)
+
 	# ── Git pre-commit secret scanning hook ───────────────────────────────────
-	write_precommit_hook(project_path, detect_secrets_bin)
+	write_precommit_hook(
+		project_path,
+		detect_secrets_bin,
+		install_eslint=choices.eslint,
+		install_prettier=choices.prettier,
+	)
 	verify_precommit_hook(project_path)
 
 	# ── Summary ───────────────────────────────────────────────────────────────
@@ -2708,7 +2810,14 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	hook_path = target_path / ".git" / "hooks" / "pre-commit"
 	if hook_path.exists():
 		info(f"Overwriting existing hook: {hook_path}")
-	write_precommit_hook(target_path, detect_secrets_bin)
+	# Detect frontend tools from existing project files so repair mode
+	# regenerates a hook that matches the project's original install choices.
+	write_precommit_hook(
+		target_path,
+		detect_secrets_bin,
+		install_eslint=(target_path / "eslint.config.js").exists(),
+		install_prettier=(target_path / ".prettierrc").exists(),
+	)
 	verify_precommit_hook(target_path)
 
 	# ── Summary ───────────────────────────────────────────────────────────────
