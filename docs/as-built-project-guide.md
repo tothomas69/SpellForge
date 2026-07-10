@@ -1,9 +1,37 @@
 # As-Built Project Guide
 
-> **Maintenance instructions:** This is the combined discovery and architecture guide.
-> Update this document with every commit that adds, removes, or relocates systems, components, or settings.
-> Include only what is needed for **discovery** — folder-level layout, system entry points, key functions, and architecture decisions.
+> **Maintenance instructions:** This is the combined design-intent, discovery, and architecture guide.
+> Update this document with every commit that adds, removes, or relocates systems, components, or settings, or that changes the project's goals or scope.
+> Include only what is needed for **design intent** (what this project is and why) and **discovery** — folder-level layout, system entry points, key functions, and architecture decisions.
 > Do not document implementation details or individual file exports; reading the code handles that.
+
+## Design Intent
+
+### What We Are Building
+
+automated environment setup
+
+### Problem We Are Solving
+
+- [ ] What pain point does this eliminate?
+- [ ] Who experiences this pain?
+- [ ] What does success look like for the user?
+
+### Goals
+
+- [ ] Define primary goals here
+
+### Features
+
+- [ ] List key features here
+
+### Technical Requirements
+
+- [ ] List technical requirements here
+
+### Out of Scope
+
+- [ ] List what is explicitly not included here
 
 ## Directory Structure
 
@@ -26,8 +54,7 @@ spellforge/
 ├── .prettierignore           # Prettier ignore list (generated when frontend tools opted in)
 ├── eslint.config.js          # ESLint flat config v9+ (generated when frontend tools opted in)
 ├── docs/
-│   ├── prd.md                # Product Requirements Document
-│   └── as-built-project-guide.md  # This file
+│   └── as-built-project-guide.md  # This file — design intent, discovery, and architecture
 ├── images/                   # README assets
 ├── .claude/
 │   └── settings.local.json   # Claude Code permissions (no hooks; quality gate lives in git pre-commit)
@@ -43,18 +70,22 @@ Single-file script that orchestrates all project setup. Two run modes, dispatche
 - `python spellforge.py --repair PATH [--rebuild-venv]` — Repair mode for an existing Spellforge-managed project. Re-validates Python, optionally rebuilds the venv, reinstalls base packages with strict pip isolation, and regenerates the post-edit hook. Does **not** touch git history, `pyproject.toml`, `CLAUDE.md`, `docs/`, `tests/`, or any other project config.
 
 **Module-level constants:**
+
 - `PYTHON_TARGET_MINOR`, `PYTHON_TARGET_LABEL`, `PYTHON_TARGET_BIN_NAME`, `PYTHON_TARGET_BREW_FORMULA` — Single source of truth for the pinned Python version (currently 3.13). Bumping the target is a one-line change.
 - `BASE_PACKAGES` — The list of packages installed into every new project venv.
 
 **Key classes:**
+
 - `InstallChoices` — Dataclass holding user selections from the interactive menu (which optional tools to install)
 
 **Key entry-point functions:**
+
 - `do_fresh_install()` — The full interactive bootstrap flow.
 - `do_repair(target_path, rebuild_venv=False)` — Repair flow; runs only Python/venv/base-packages/pre-commit-hook steps.
 - `_parse_args()` — argparse dispatcher; `__main__` is just a thin shim over this.
 
 **Key functions:**
+
 - `show_installation_menu()` — Presents the interactive menu (paginated: required tools page → optional tools page → confirmation) and returns an `InstallChoices` instance
 - `print_summary()` — Paginated final summary: page 1 shows what was installed, page 2 shows next steps, a "Testing setup required" notice (pytest is not automatic; user must replace placeholder, narrow `--cov`, and add CI), and useful paths
 - `press_any_key(prompt)` — UI helper that waits for a single keypress (raw terminal mode) to advance between pages

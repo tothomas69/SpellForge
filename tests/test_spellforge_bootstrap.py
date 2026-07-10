@@ -286,10 +286,10 @@ class TestDirectoryStructure:
 			"tests/conftest.py not found — shared test fixtures are not available"
 		)
 
-	def test_prd_exists(self):
-		"""docs/prd.md must exist — Claude Code reads this to understand the project."""
-		assert (PROJECT_ROOT / "docs" / "prd.md").exists(), (
-			"docs/prd.md not found — Claude Code has no product requirements to reference"
+	def test_prd_removed(self):
+		"""docs/prd.md was folded into as-built's Design Intent section and must not exist."""
+		assert not (PROJECT_ROOT / "docs" / "prd.md").exists(), (
+			"docs/prd.md exists — design intent belongs in as-built-project-guide.md now"
 		)
 
 	def test_as_built_guide_exists(self):

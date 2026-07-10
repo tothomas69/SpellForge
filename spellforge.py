@@ -934,8 +934,7 @@ def create_directory_structure(project_path: Path):
 
 	    .claude/                      ← Claude Code config (settings.local.json)
 	    docs/
-	        prd.md                    ← Product Requirements Doc
-	        as-built-project-guide.md ← as-built project guide architecture document
+	        as-built-project-guide.md ← design intent + discovery + architecture guide
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1003,7 +1002,17 @@ def write_settings_local(project_path: Path):
 				"Bash(ruff format:*)",
 				# Allow fetching from GitHub raw content (common for scripts/configs)
 				"WebFetch(domain:raw.githubusercontent.com)",
-			]
+			],
+			# Tests must never run silently. "Bash(python3:*)" above is broad
+			# enough to swallow "python3 -m pytest ...", so these narrower,
+			# more specific rules force a prompt for every test invocation
+			# regardless of how pytest is called.
+			"ask": [
+				"Bash(pytest:*)",
+				"Bash(python3 -m pytest:*)",
+				"Bash(python -m pytest:*)",
+				"Bash(.venv/bin/pytest:*)",
+			],
 		},
 	}
 
@@ -1031,9 +1040,8 @@ def write_claude_md(project_path: Path):
 This file provides essential context for Claude Code when working on this project.
 
 ## Project Documentation
-The following files contain critical project information:
-- @docs/prd.md - Product Requirements Document with goals, features, and technical requirements
-- @docs/as-built-project-guide.md - Combined discovery and architecture guide. **Read this before implementing anything new** to find what already exists, understand architecture decisions, and follow established patterns.
+The following file contains critical project information:
+- @docs/as-built-project-guide.md - Design intent, discovery, and architecture guide. **Read this before implementing anything new** to understand why the project exists, find what already exists, and follow established patterns.
 
 ## Development Environment
 **Platform**: macOS
@@ -1125,10 +1133,11 @@ The as-built project guide is the primary discovery document for finding existin
 
 def write_agent_docs(project_path: Path):
 	"""
-	Create the docs/ documentation files that CLAUDE.md references.
-	Writes two files:
-	  - prd.md                    product requirements document
-	  - as-built-project-guide.md combined discovery + architecture doc
+	Create docs/as-built-project-guide.md, the single documentation file
+	CLAUDE.md references. It combines discovery/architecture content with a
+	"Design Intent" section (what the project is and why it exists), so
+	there is one living document instead of a separate requirements doc that
+	drifts out of sync with the code.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1137,53 +1146,24 @@ def write_agent_docs(project_path: Path):
 
 	docs_path = project_path / "docs"
 
-	# ── prd.md ────────────────────────────────────────────────────────────────
-	prd_path = docs_path / "prd.md"
-	if not prd_path.exists():
-		prd_path.write_text(
-			"# Product Requirements Document\n\n"
-			"## What We Are Building\n\n"
-			"> Describe what this project does in one sentence.\n\n"
-			"## Problem We Are Solving\n\n"
-			"- [ ] What pain point does this eliminate?\n"
-			"- [ ] Who experiences this pain?\n"
-			"- [ ] What does success look like for the user?\n\n"
-			"## Goals\n\n"
-			"- [ ] Define primary goals here\n\n"
-			"## Features\n\n"
-			"- [ ] List key features here\n\n"
-			"## Technical Requirements\n\n"
-			"- [ ] List technical requirements here\n\n"
-			"## Out of Scope\n\n"
-			"- [ ] List what is explicitly not included here\n\n"
-			"## Definition of Done\n\n"
-			"- All acceptance criteria met\n"
-			"- All tests pass with minimum 80% coverage\n"
-			"- No linter, formatter, or type checker issues\n"
-			"- docs/as-built-project-guide.md updated to reflect changes\n"
-		)
-		success(f"Written: {prd_path}")
-	else:
-		warning(f"Already exists - skipping: {prd_path}")
-
 	# ── as-built-project-guide.md ─────────────────────────────────────────────
-	# Combines what were previously three separate files:
-	#   project-guide.md + as-built.md + project-guide-instructions.md
 	abpg_path = docs_path / "as-built-project-guide.md"
 	if not abpg_path.exists():
 		abpg_path.write_text(
 			"# As-Built Project Guide\n\n"
-			"> This document serves two purposes:\n"
-			"> 1. **Discovery** - find what exists before building something new\n"
-			"> 2. **Architecture** - document how systems are built and why\n"
+			"> This document serves three purposes:\n"
+			"> 1. **Design Intent** - what this project is and why it exists\n"
+			"> 2. **Discovery** - find what exists before building something new\n"
+			"> 3. **Architecture** - document how systems are built and why\n"
 			">\n"
 			"> Update this file with every commit. Keep it minimal and scannable.\n\n"
 			"---\n\n"
 			"## How to Maintain This Document\n\n"
 			"Before committing, ask: did I add, remove, or move any systems, "
-			"components, or endpoints?\n"
+			"components, or endpoints? Did the project's goals or scope change?\n"
 			"If yes - update the relevant section below before committing.\n\n"
 			"Include:\n"
+			"- What the project is and why it exists, updated as scope evolves\n"
 			"- Folder-level structure (not individual files)\n"
 			"- Major systems with their entry points and key functions\n"
 			"- API endpoints with input shape and purpose\n"
@@ -1193,6 +1173,21 @@ def write_agent_docs(project_path: Path):
 			"- Implementation details (read the code)\n"
 			"- Generic framework conventions (project-specific only)\n\n"
 			"---\n\n"
+			"## Design Intent\n\n"
+			"### What We Are Building\n\n"
+			"_Describe what this project does in one sentence._\n\n"
+			"### Problem We Are Solving\n\n"
+			"- [ ] What pain point does this eliminate?\n"
+			"- [ ] Who experiences this pain?\n"
+			"- [ ] What does success look like for the user?\n\n"
+			"### Goals\n\n"
+			"- [ ] Define primary goals here\n\n"
+			"### Features\n\n"
+			"- [ ] List key features here\n\n"
+			"### Technical Requirements\n\n"
+			"- [ ] List technical requirements here\n\n"
+			"### Out of Scope\n\n"
+			"- [ ] List what is explicitly not included here\n\n"
 			"## Directory Structure\n\n"
 			"_Document your folder layout here._\n\n"
 			"## Systems\n\n"
@@ -1497,7 +1492,7 @@ def print_summary(project_path: Path):
   {C.GREEN}✔{C.RESET}  Claude Code (global npm install)
   {C.GREEN}✔{C.RESET}  .claude/settings.local.json (Claude Code permissions)
   {C.GREEN}✔{C.RESET}  CLAUDE.md (Claude Code project context)
-  {C.GREEN}✔{C.RESET}  docs/ (prd.md, as-built-project-guide.md)
+  {C.GREEN}✔{C.RESET}  docs/ (as-built-project-guide.md)
   {C.GREEN}✔{C.RESET}  .git/hooks/pre-commit (ruff format/check + secret scanning before commit)
 """)
 
@@ -1511,8 +1506,8 @@ def print_summary(project_path: Path):
   2. {C.CYAN}source .venv/bin/activate{C.RESET}   ← activate your virtual environment
   3. {C.CYAN}pytest tests/ -v{C.RESET}             ← verify everything is working
   4. {C.CYAN}claude{C.RESET}                       ← start a Claude Code session
-  5. Fill in {C.YELLOW}docs/prd.md{C.RESET} with your project goals
-  6. Fill in {C.YELLOW}docs/as-built-project-guide.md{C.RESET} as you build
+  5. Fill in the {C.YELLOW}Design Intent{C.RESET} section of {C.YELLOW}docs/as-built-project-guide.md{C.RESET} with your project goals
+  6. Keep the rest of {C.YELLOW}docs/as-built-project-guide.md{C.RESET} updated as you build
 
 {C.YELLOW}{C.BOLD}Testing setup required:{C.RESET}
   The pre-commit hook runs Ruff + secret scanning only — pytest never fires on commit.
@@ -1532,10 +1527,11 @@ def print_summary(project_path: Path):
 
 
 # =============================================================================
-# PROJECT NAME + PRD PROMPT
+# PROJECT NAME + DESIGN INTENT PROMPT
 # Ask the user for their project name (used in pyproject.toml) and a brief
-# description of what they are building (written into prd.md as a starting
-# point so Claude Code has real context from day one).
+# description of what they are building (written into as-built's Design
+# Intent section as a starting point so Claude Code has real context from
+# day one).
 # =============================================================================
 
 
@@ -1564,18 +1560,22 @@ def get_project_name(project_path: Path) -> str:
 	return project_name
 
 
-def prompt_prd(project_path: Path, project_name: str):
+def prompt_design_intent(project_path: Path):
 	"""
 	Ask the user for a short description of what they are building and
-	write it into docs/prd.md as a starting point. Claude Code reads
-	this file at the start of every session, so even a rough description
-	dramatically improves the quality of AI assistance.
+	fill it into the "What We Are Building" placeholder under as-built's
+	Design Intent section. Claude Code reads this file at the start of
+	every session, so even a rough description dramatically improves the
+	quality of AI assistance.
+
+	Edits the file in place (rather than rewriting it) so the Directory
+	Structure / Systems / Architecture Decisions sections that
+	write_agent_docs() already wrote are left untouched.
 
 	Args:
-	    project_path:  The resolved Path to the project root directory.
-	    project_name:  Inserted as the PRD heading.
+	    project_path: The resolved Path to the project root directory.
 	"""
-	step("📄", "Product Requirements Document (docs/prd.md)")
+	step("📄", "Design Intent (docs/as-built-project-guide.md)")
 
 	print(f"""
   {C.WHITE}What are you building?{C.RESET}
@@ -1586,52 +1586,26 @@ def prompt_prd(project_path: Path, project_name: str):
 
 	description = input(f"  {C.BOLD}{C.MAGENTA}➜ Project description: {C.RESET}").strip()
 
-	prd_path = project_path / "docs" / "prd.md"
+	abpg_path = project_path / "docs" / "as-built-project-guide.md"
+	placeholder = "_Describe what this project does in one sentence._"
 
-	if description:
-		# Write a real PRD seed with the user's description
-		prd_content = f"""# Product Requirements Document - {project_name}
+	if not description:
+		warning("No description provided - Design Intent left as placeholder.")
+		info(f"Fill it in later at: {C.YELLOW}{abpg_path}{C.RESET}")
+		return
 
-## What We Are Building
+	if not abpg_path.exists():
+		fatal(f"{abpg_path} not found - write_agent_docs() should have created it first.")
 
-{description}
+	content = abpg_path.read_text()
+	if placeholder not in content:
+		warning("Design Intent placeholder not found - leaving as-built untouched.")
+		info(f"Add your description manually at: {C.YELLOW}{abpg_path}{C.RESET}")
+		return
 
-## Problem We Are Solving
-
-- [ ] What pain point does this eliminate?
-- [ ] Who experiences this pain?
-- [ ] What does success look like for the user?
-
-## Goals
-
-- [ ] Define primary goals here
-
-## Features
-
-- [ ] List key features here
-
-## Technical Requirements
-
-- [ ] List technical requirements here
-
-## Out of Scope
-
-- [ ] List what is explicitly not included here
-
-## Definition of Done
-
-- All acceptance criteria met
-- All tests pass with minimum 80% coverage
-- No linter, formatter, or type checker issues
-- docs/as-built-project-guide.md updated to reflect changes
-"""
-		prd_path.write_text(prd_content)
-		success(f"prd.md written with your description: {prd_path}")
-		info("Expand this file as the project takes shape.")
-	else:
-		# Leave the placeholder that write_agent_docs already created
-		warning("No description provided - prd.md left as placeholder.")
-		info(f"Fill it in later at: {C.YELLOW}{prd_path}{C.RESET}")
+	abpg_path.write_text(content.replace(placeholder, description, 1))
+	success(f"Design Intent updated with your description: {abpg_path}")
+	info("Expand the rest of the Design Intent section as the project takes shape.")
 
 
 # =============================================================================
@@ -2330,24 +2304,20 @@ def verify_claude_md(project_path: Path):
 
 def verify_agent_docs(project_path: Path):
 	"""
-	Confirm both docs/ documentation files exist and are non-empty.
-	These are referenced by CLAUDE.md and must be present for Claude Code
+	Confirm docs/as-built-project-guide.md exists and is non-empty.
+	It is referenced by CLAUDE.md and must be present for Claude Code
 	to find project context during sessions.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	"""
-	required_files = [
-		project_path / "docs" / "prd.md",
-		project_path / "docs" / "as-built-project-guide.md",
-	]
+	doc_path = project_path / "docs" / "as-built-project-guide.md"
 
-	for doc_path in required_files:
-		if not doc_path.exists():
-			fatal(f"Agent docs verification failed - missing: {doc_path}")
-		if doc_path.stat().st_size == 0:
-			fatal(f"Agent docs verification failed - file is empty: {doc_path}")
-		success(f"✔ Verified agent doc: {doc_path.name}")
+	if not doc_path.exists():
+		fatal(f"Agent docs verification failed - missing: {doc_path}")
+	if doc_path.stat().st_size == 0:
+		fatal(f"Agent docs verification failed - file is empty: {doc_path}")
+	success(f"✔ Verified agent doc: {doc_path.name}")
 
 
 def verify_precommit_hook(project_path: Path):
@@ -2735,8 +2705,8 @@ def do_fresh_install():
 	write_agent_docs(project_path)
 	verify_agent_docs(project_path)
 
-	# ── PRD prompt ────────────────────────────────────────────────────────────
-	prompt_prd(project_path, project_name)
+	# ── Design intent prompt ──────────────────────────────────────────────────
+	prompt_design_intent(project_path)
 
 	# ── .gitignore ────────────────────────────────────────────────────────────
 	write_gitignore(project_path)
