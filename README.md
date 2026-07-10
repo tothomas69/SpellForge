@@ -4,7 +4,7 @@
 
 # 🪄 SpellForge
 
-> *Because setting up a Python project from scratch is a curse. SpellForge breaks it.*
+> _Because setting up a Python project from scratch is a curse. SpellForge breaks it._
 
 SpellForge is a Claude-powered Python project bootstrapper that conjures fully configured, production-ready Python projects from thin air — complete with colorful terminal output, fail-fast verification and your personal coding standards baked right in.
 
@@ -18,29 +18,29 @@ SpellForge walks you through an interactive menu, then installs and configures e
 
 ### 🔒 Required (always installed)
 
-| Tool | What it does | Why it matters |
-|------|-------------|----------------|
-| **Git** | Version control | Initialises a repo and wires up the pre-commit hook automatically |
-| **Python venv** | Isolated environment | Keeps your project dependencies clean and separate from system Python |
-| **Ruff** | Linter + formatter | Blazing fast — replaces flake8, isort, and black in one tool. Enforces consistent code style on every save |
-| **pytest + pytest-cov** | Testing + coverage | Enforces 80% minimum test coverage so quality doesn't quietly erode |
-| **detect-secrets** | Secret scanner | Scans every commit for API keys, passwords, and tokens before they ever leave your machine |
-| **requests** | HTTP library | The go-to for any API calls your project needs |
-| **Claude Code** | AI coding assistant | Installed globally via npm — powers AI-assisted development right in your terminal |
-| **CLAUDE.md** | AI context file | Pre-written instructions that tell Claude Code your coding standards, project structure, and rules |
-| **Pre-commit hook** | Automatic secret scanning | Runs detect-secrets on every `git commit` — you can't accidentally push a leaked key |
-| **.gitignore** | Git exclusions | Pre-configured to ignore venv, pycache, secrets baseline, IDE files, and more |
-| **pyproject.toml** | Project config | Configures Ruff rules, pytest settings, and project metadata in one place |
-| **Directory structure** | Scaffolded layout | Creates `src/`, `tests/`, `docs/` and wires them up correctly from day one |
+| Tool                    | What it does              | Why it matters                                                                                                                                                                                                             |
+| ----------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Git**                 | Version control           | Initialises a repo and wires up the pre-commit hook automatically                                                                                                                                                          |
+| **Python venv**         | Isolated environment      | Keeps your project dependencies clean and separate from system Python. You choose the package manager — **pip** (classic, always available) or **uv** (a much faster Rust-based drop-in, installed via Homebrew if needed) |
+| **Ruff**                | Linter + formatter        | Blazing fast — replaces flake8, isort, and black in one tool. Enforces consistent code style on every save                                                                                                                 |
+| **pytest + pytest-cov** | Testing + coverage        | Enforces 80% minimum test coverage so quality doesn't quietly erode                                                                                                                                                        |
+| **detect-secrets**      | Secret scanner            | Scans every commit for API keys, passwords, and tokens before they ever leave your machine                                                                                                                                 |
+| **requests**            | HTTP library              | The go-to for any API calls your project needs                                                                                                                                                                             |
+| **Claude Code**         | AI coding assistant       | Installed globally via npm — powers AI-assisted development right in your terminal                                                                                                                                         |
+| **CLAUDE.md**           | AI context file           | Pre-written instructions that tell Claude Code your coding standards, project structure, and rules                                                                                                                         |
+| **Pre-commit hook**     | Automatic secret scanning | Runs detect-secrets on every `git commit` — you can't accidentally push a leaked key                                                                                                                                       |
+| **.gitignore**          | Git exclusions            | Pre-configured to ignore venv, pycache, secrets baseline, IDE files, and more                                                                                                                                              |
+| **pyproject.toml**      | Project config            | Configures Ruff rules, pytest settings, and project metadata in one place                                                                                                                                                  |
+| **Directory structure** | Scaffolded layout         | Creates `src/`, `tests/`, `docs/` and wires them up correctly from day one                                                                                                                                                 |
 
 ### ⚙️ Optional (your choice)
 
-| Tool | What it does | Why you might want it |
-|------|-------------|----------------------|
-| **Bandit** | Python security scanner | Catches hardcoded passwords, unsafe `eval()`, weak crypto, and dangerous SQL patterns before they reach production |
-| **ESLint** | JavaScript/TypeScript linter | Catches bugs and bad patterns in `.js`, `.ts`, `.jsx`, `.tsx` files — essential if your project has a frontend |
-| **Prettier** | Frontend formatter | Enforces consistent formatting across JS, TS, HTML, CSS, JSON, YAML, and Markdown |
-| **Watchdog** | Filesystem monitor | Watches for file changes in real time — great for auto-reloading scripts or triggering pipelines on data drops |
+| Tool         | What it does                 | Why you might want it                                                                                              |
+| ------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Bandit**   | Python security scanner      | Catches hardcoded passwords, unsafe `eval()`, weak crypto, and dangerous SQL patterns before they reach production |
+| **ESLint**   | JavaScript/TypeScript linter | Catches bugs and bad patterns in `.js`, `.ts`, `.jsx`, `.tsx` files — essential if your project has a frontend     |
+| **Prettier** | Frontend formatter           | Enforces consistent formatting across JS, TS, HTML, CSS, JSON, YAML, and Markdown                                  |
+| **Watchdog** | Filesystem monitor           | Watches for file changes in real time — great for auto-reloading scripts or triggering pipelines on data drops     |
 
 ### 🎨 SpellForge itself
 
@@ -53,7 +53,7 @@ SpellForge walks you through an interactive menu, then installs and configures e
 
 ## 🖼️ Demo
 
-> 📸 *Screenshots coming soon *
+> 📸 _Screenshots coming soon _
 
 ---
 
@@ -92,6 +92,7 @@ Follow the prompts, describe your project, and watch the magic happen. ✨
 ### 5. Verify the bootstrap
 
 After SpellForge runs, confirm everything was set up correctly by running the built-in verification suite:
+
 ```bash
 pytest tests/ -v
 ```
@@ -118,7 +119,7 @@ Repair mode only touches the Python interpreter, virtualenv, base packages, and 
 
 ## 🐍 Why Python 3.13?
 
-SpellForge pins every new project to Python 3.13 instead of using whatever `python3` happens to be on PATH. The reason: `brew install python3` resolves to the *current* formula (3.14 at the time of writing), which is too new for the typical dependency matrix — pandas, pydantic, and other native-extension packages lag behind major releases. 3.13 is the current stable release with broad wheel coverage.
+SpellForge pins every new project to Python 3.13 instead of using whatever `python3` happens to be on PATH. The reason: `brew install python3` resolves to the _current_ formula (3.14 at the time of writing), which is too new for the typical dependency matrix — pandas, pydantic, and other native-extension packages lag behind major releases. 3.13 is the current stable release with broad wheel coverage.
 
 If you need to bump the target version, change the `PYTHON_TARGET_MINOR` constant near the top of `spellforge.py` — every version check in the script reads from it.
 
@@ -132,9 +133,9 @@ Pull requests are welcome! This is a solo side project so contributions might ta
 
 1. **Fork** the repo
 2. **Create a branch** for your feature or fix:
-   ```bash
-   git checkout -b feature/your-cool-idea
-   ```
+    ```bash
+    git checkout -b feature/your-cool-idea
+    ```
 3. **Make your changes** — please keep code well-commented and readable
 4. **Test your changes** to make sure nothing breaks
 5. **Submit a pull request** with a clear description of what you changed and why
