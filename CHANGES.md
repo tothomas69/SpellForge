@@ -5,7 +5,32 @@ fix the silent-failure mode that produced your `⚠ Ruff not found at
 .../.venv/bin/ruff` error and to pin projects to Python 3.13.x instead of
 inheriting whatever `python3` happened to resolve to.
 
-## 0. Secret-scanning hook rewrite (latest pass)
+## 0. pip / uv package manager choice (latest pass)
+
+The installation menu now has a dedicated page where the user picks `pip`
+(classic, always available once Python is) or `uv` (a much faster Rust-based
+drop-in). The choice drives venv creation and every subsequent package
+install:
+
+- `create_venv()` dispatches to `python -m venv` or `uv venv --python
+<python_bin>`, and now returns the venv's `python3` path (rather than a
+  `pip` path) since a uv-created venv has no `pip` binary by design.
+- `_pip_install()` was generalized into `_install_packages()`, which either
+  runs the existing isolated `python -m pip install` flow or shells out to
+  `uv pip install --python <venv_python>`.
+- `verify_venv()` skips the pip-existence check under uv, since uv manages
+  installs directly against the interpreter rather than through a pip binary
+  in the venv.
+- `ensure_uv()` installs uv via Homebrew if it's not already on PATH,
+  following the same fatal-with-manual-instructions pattern as
+  `ensure_python()` when Homebrew isn't available.
+- Repair mode (`--repair`) is non-interactive and has no `InstallChoices` to
+  read the original choice from, so `_detect_venv_package_manager()` reads
+  the existing venv's `pyvenv.cfg` for uv's `uv = <version>` marker line
+  (read _before_ any `--rebuild-venv` deletion) and re-targets the same
+  manager instead of silently defaulting back to pip.
+
+## 1. Secret-scanning hook rewrite
 
 The pre-commit secret stage was rewritten after it repeatedly blocked
 legitimate commits in a real project. The old design ran a whole-tree
@@ -40,8 +65,7 @@ Net effect: migrations, the baseline, and unrelated high-entropy strings no
 longer block commits, while a real newly-introduced secret in a staged file
 still does.
 
-
-## 1. Python version pinning (3.13.x)
+## 2. Python version pinning (3.13.x)
 
 - New module-level constants near the top: `PYTHON_TARGET_MINOR = (3, 13)`,
   `PYTHON_TARGET_LABEL`, `PYTHON_TARGET_BIN_NAME` (`python3.13`),
@@ -57,14 +81,14 @@ still does.
     6. Fatal with python.org / pyenv instructions if brew isn't available
 - Rewrote `verify_python(python_bin)`. Now takes an explicit interpreter path
   and asserts `sys.version_info[:2] == (3, 13)`. Refuses to trust the
-  binary's *name* alone (wrapper shenanigans).
+  binary's _name_ alone (wrapper shenanigans).
 - Updated `requires-python` in the generated `pyproject.toml` from `">=3.11"`
   to `">=3.13,<3.14"`. Renders from the same constants so the two never
   drift apart.
 - `verify_venv()` now also re-verifies the venv Python is 3.13 (defense in
   depth — `create_venv` should have already guaranteed this).
 
-## 2. Stop silent reuse of wrong-version venvs
+## 3. Stop silent reuse of wrong-version venvs
 
 - `create_venv()` no longer blindly reuses an existing `.venv`. New
   `_venv_python_version()` helper reports the existing venv's actual major.
@@ -72,7 +96,7 @@ still does.
   message. The previous behavior — printing "skipping creation" and reusing
   whatever was there — was a major contributor to the failure mode you hit.
 
-## 3. Hardened pip installs (the headline fix)
+## 4. Hardened pip installs (the headline fix)
 
 This is the change that prevents your specific failure from recurring.
 
@@ -90,7 +114,7 @@ This is the change that prevents your specific failure from recurring.
   pip fallback, `install_bandit`) routed through `_pip_install`. No more
   raw `pip_bin install` calls anywhere in the script.
 
-## 4. Verification actually fatals now
+## 5. Verification actually fatals now
 
 `verify_packages()`:
 
@@ -103,7 +127,7 @@ This is the change that prevents your specific failure from recurring.
   post-edit hook pointing at a non-existent ruff binary and exit clean.
   That door is now locked.
 
-## 5. Guard the unguarded brew call
+## 6. Guard the unguarded brew call
 
 `install_detect_secrets()`: the `run(["brew", "install", "detect-secrets"])`
 call now lives inside `if brew_available():`. Previously, on a machine
@@ -111,7 +135,7 @@ without Homebrew, this line crashed Spellforge with `FileNotFoundError`
 instead of falling back to pip as intended. The pip-fallback branch now
 also routes through `_pip_install` for isolation.
 
-## 6. Repair mode
+## 7. Repair mode
 
 New `--repair PATH` flag for fixing an existing project without
 re-bootstrapping it from scratch:
@@ -134,7 +158,7 @@ settings.local.json, pre-commit hook, .gitignore, or anything else.
 If watchdog is detected in the existing venv, it's automatically added to
 the re-verification set.
 
-## 7. Refactor
+## 8. Refactor
 
 The monolithic `__main__` block was extracted into two functions:
 
