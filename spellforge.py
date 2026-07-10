@@ -735,7 +735,17 @@ def init_secrets_baseline(project_path: Path, detect_secrets_bin: str):
 		return
 
 	info("Generating initial .secrets.baseline file...")
-	result = run([detect_secrets_bin, "scan"], cwd=str(project_path), capture=True, check=False)
+	# Exclude the baseline itself and generated files that legitimately contain
+	# high-entropy strings (Alembic migration revision IDs). This must match the
+	# EXCLUDE_PATTERN in the pre-commit hook, or the baseline and the hook will
+	# disagree about what counts as a finding.
+	exclude_pattern = r"(\.secrets\.baseline$|/versions/.*\.py$|^alembic/versions/)"
+	result = run(
+		[detect_secrets_bin, "scan", "--exclude-files", exclude_pattern],
+		cwd=str(project_path),
+		capture=True,
+		check=False,
+	)
 
 	if result.returncode != 0:
 		warning(f"detect-secrets scan returned an error: {result.stderr.strip()}")
@@ -1315,7 +1325,11 @@ fi
 # Inactive stages are omitted — only installed tools run.
 #
 # To update the secrets baseline after intentionally adding a known value:
-#   detect-secrets scan > .secrets.baseline
+#   detect-secrets scan --exclude-files '(\\.secrets\\.baseline$|^alembic/versions/)' > .secrets.baseline
+#
+# The secret stage scans only STAGED files against the baseline via
+# detect-secrets-hook, and excludes the baseline file and Alembic migrations
+# (which contain high-entropy revision IDs that are not secrets).
 #
 # Exit codes:
 #   0 — all checks passed, commit proceeds
@@ -1381,39 +1395,50 @@ fi
 
 echo "🔐 Scanning for secrets..."
 
-# Scan to a temp file and compare results to the baseline.
-# We never write back to the baseline from the hook - that would cause
-# an infinite loop: commit -> scan -> baseline changes -> needs commit.
-# To update the baseline intentionally: detect-secrets scan > .secrets.baseline
-TMPFILE=$(mktemp)
-"$DETECT_SECRETS" scan > "$TMPFILE"
-scan_exit=$?
+# Scan ONLY the staged files against the baseline, using detect-secrets'
+# purpose-built pre-commit entry point. This is the idiomatic approach and
+# avoids three failure modes of a whole-tree scan-and-compare:
+#   1. It checks staged files against the baseline rather than demanding the
+#      whole-tree scan equal the baseline exactly, so an unrelated existing
+#      finding never blocks an unrelated commit.
+#   2. EXCLUDE_PATTERN keeps the baseline from scanning itself (the baseline
+#      file contains hashes; scanning it flags those hashes — an infinite loop).
+#   3. The same pattern excludes generated files that legitimately contain
+#      high-entropy strings (e.g. Alembic migration revision IDs), which would
+#      otherwise trip the scanner on every new migration.
+#
+# detect-secrets-hook exits non-zero only when a staged file contains a NEW
+# secret not already in the baseline. Inline `pragma: allowlist secret`
+# comments are still honored for one-off false positives.
+EXCLUDE_PATTERN='(\\.secrets\\.baseline$|/versions/.*\\.py$|^alembic/versions/)'
 
-if [ $scan_exit -ne 0 ]; then
-  echo "\u26a0  detect-secrets scan failed - skipping check." >&2
-  rm -f "$TMPFILE"
-  exit 0
+staged_all=$(git diff --cached --name-only --diff-filter=ACM || true)
+
+if [ -n "$staged_all" ]; then
+  # detect-secrets-hook ships alongside detect-secrets in the same bin dir.
+  DETECT_SECRETS_HOOK="$(dirname "$DETECT_SECRETS")/detect-secrets-hook"
+  if [ ! -x "$DETECT_SECRETS_HOOK" ]; then
+    # Fall back to the module invocation if the wrapper script isn't present.
+    DETECT_SECRETS_HOOK="$DETECT_SECRETS-hook"
+  fi
+
+  # shellcheck disable=SC2086
+  if ! echo "$staged_all" | xargs "$DETECT_SECRETS_HOOK" \
+      --baseline "$BASELINE" \
+      --exclude-files "$EXCLUDE_PATTERN"; then
+    echo "" >&2
+    echo "🚨 New secret detected in a staged file! Commit blocked." >&2
+    echo "   If it is a real secret: remove it and re-commit." >&2
+    echo "   If it is a false positive: add an inline" >&2
+    echo "     # pragma: allowlist secret" >&2
+    echo "   comment on that line, or update the baseline:" >&2
+    echo "     detect-secrets scan --exclude-files '$EXCLUDE_PATTERN' > .secrets.baseline" >&2
+    echo "     git add .secrets.baseline" >&2
+    exit 1
+  fi
 fi
 
-# Compare only the results section - ignore version/plugin metadata changes
-BASELINE_RESULTS=$(python3 -c \
-  "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('results',{}), sort_keys=True))" \
-  "$BASELINE")
-SCAN_RESULTS=$(python3 -c \
-  "import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get('results',{}), sort_keys=True))" \
-  "$TMPFILE")
-rm -f "$TMPFILE"
-
-if [ "$BASELINE_RESULTS" != "$SCAN_RESULTS" ]; then
-  echo "" >&2
-  echo "\U0001f6a8 New secrets detected! Commit blocked." >&2
-  echo "   Review with: detect-secrets audit .secrets.baseline" >&2
-  echo "   To update baseline after confirming false positives:" >&2
-  echo "   detect-secrets scan > .secrets.baseline && git add .secrets.baseline" >&2
-  exit 1
-fi
-
-echo "\u2714  No new secrets detected."
+echo "✔  No new secrets detected."
 exit 0
 """
 	)

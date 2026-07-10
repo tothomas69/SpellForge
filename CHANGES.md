@@ -5,6 +5,42 @@ fix the silent-failure mode that produced your `⚠ Ruff not found at
 .../.venv/bin/ruff` error and to pin projects to Python 3.13.x instead of
 inheriting whatever `python3` happened to resolve to.
 
+## 0. Secret-scanning hook rewrite (latest pass)
+
+The pre-commit secret stage was rewritten after it repeatedly blocked
+legitimate commits in a real project. The old design ran a whole-tree
+`detect-secrets scan` and demanded the result equal the baseline exactly.
+Three failure modes came out of that:
+
+- **Self-reference loop.** The scan included `.secrets.baseline` itself. Once
+  the baseline contained a hash, the next scan flagged that hash as a new
+  finding, so `scan > .secrets.baseline` never converged.
+- **Generated high-entropy strings.** Alembic migration files carry a random
+  revision ID (e.g. `revision = "7c94f5e48cb0"`). The hex detector flags it,
+  so every new migration blocked its own commit.
+- **Exact-equality brittleness.** Any new high-entropy string anywhere in the
+  tree (a UUID literal in a test, etc.) broke an otherwise-unrelated commit.
+
+The fix, in `write_precommit_hook()` and `init_secrets_baseline()`:
+
+- The hook now uses **`detect-secrets-hook --baseline <baseline>`** on the
+  **staged files only** — the tool's purpose-built pre-commit entry point. It
+  exits non-zero only on a genuinely new secret, not on any tree-wide diff.
+- An `EXCLUDE_PATTERN` skips `.secrets.baseline` (kills the self-reference
+  loop) and `alembic/versions/` migration files (kills the revision-ID false
+  positive). The same pattern is applied when the baseline is first generated,
+  so the baseline and the hook always agree.
+- Inline `# pragma: allowlist secret` comments remain honored for one-off
+  false positives, and the blocked-commit message now tells the user about
+  that option as well as how to regenerate the baseline with the exclusions.
+- A pre-existing wrapper/module fallback locates `detect-secrets-hook` next to
+  the `detect-secrets` binary, with `$DETECT_SECRETS-hook` as a fallback.
+
+Net effect: migrations, the baseline, and unrelated high-entropy strings no
+longer block commits, while a real newly-introduced secret in a staged file
+still does.
+
+
 ## 1. Python version pinning (3.13.x)
 
 - New module-level constants near the top: `PYTHON_TARGET_MINOR = (3, 13)`,
