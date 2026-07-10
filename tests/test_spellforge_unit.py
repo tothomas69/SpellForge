@@ -37,6 +37,37 @@ class TestInstallChoices:
 		assert not choices.watchdog
 		assert not choices.bandit
 
+	def test_package_manager_defaults_to_pip(self):
+		"""Non-interactive callers (e.g. repair mode) must get pip unless told otherwise."""
+		choices = spellforge.InstallChoices()
+		assert choices.package_manager == spellforge.PACKAGE_MANAGER_PIP
+
+
+# =============================================================================
+# _detect_venv_package_manager
+# =============================================================================
+
+
+class TestDetectVenvPackageManager:
+	"""Repair mode reads pyvenv.cfg to re-target the venv's original package manager."""
+
+	def test_missing_pyvenv_cfg_defaults_to_pip(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_PIP
+
+	def test_stdlib_venv_pyvenv_cfg_is_pip(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		(venv_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.13.0\n")
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_PIP
+
+	def test_uv_pyvenv_cfg_is_detected(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		(venv_path / "pyvenv.cfg").write_text("home = /usr/bin\nuv = 0.5.0\nversion = 3.13.0\n")
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_UV
+
 
 # =============================================================================
 # _isolated_pip_env
@@ -106,6 +137,17 @@ class TestWriteSettingsLocal:
 		assert "hooks" not in data, (
 			"settings.local.json must not define hooks — quality gate lives in git pre-commit"
 		)
+
+	def test_pytest_requires_explicit_permission(self, tmp_path):
+		"""Tests must never auto-run — pytest invocations must be in the ask list,
+		not covered only by the broad python3/python allow rules."""
+		(tmp_path / ".claude").mkdir()
+		spellforge.write_settings_local(tmp_path)
+		data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+		ask_rules = data["permissions"]["ask"]
+		assert "Bash(pytest:*)" in ask_rules
+		assert "Bash(python3 -m pytest:*)" in ask_rules
+		assert "Bash(python -m pytest:*)" in ask_rules
 
 
 # =============================================================================
@@ -319,24 +361,12 @@ class TestCreateTestsDirectory:
 
 
 class TestWriteAgentDocs:
-	"""write_agent_docs creates prd.md and as-built-project-guide.md under docs/."""
-
-	def test_prd_created(self, tmp_path):
-		(tmp_path / "docs").mkdir()
-		spellforge.write_agent_docs(tmp_path)
-		assert (tmp_path / "docs" / "prd.md").exists()
+	"""write_agent_docs creates as-built-project-guide.md under docs/."""
 
 	def test_abpg_created(self, tmp_path):
 		(tmp_path / "docs").mkdir()
 		spellforge.write_agent_docs(tmp_path)
 		assert (tmp_path / "docs" / "as-built-project-guide.md").exists()
-
-	def test_prd_has_required_sections(self, tmp_path):
-		(tmp_path / "docs").mkdir()
-		spellforge.write_agent_docs(tmp_path)
-		content = (tmp_path / "docs" / "prd.md").read_text()
-		assert "## Goals" in content
-		assert "## Features" in content
 
 	def test_abpg_has_required_sections(self, tmp_path):
 		(tmp_path / "docs").mkdir()
@@ -345,17 +375,61 @@ class TestWriteAgentDocs:
 		assert "## Directory Structure" in content
 		assert "## Systems" in content
 
-	def test_skips_existing_prd(self, tmp_path):
+	def test_abpg_has_design_intent_section(self, tmp_path):
 		(tmp_path / "docs").mkdir()
-		(tmp_path / "docs" / "prd.md").write_text("custom prd")
 		spellforge.write_agent_docs(tmp_path)
-		assert (tmp_path / "docs" / "prd.md").read_text() == "custom prd"
+		content = (tmp_path / "docs" / "as-built-project-guide.md").read_text()
+		assert "## Design Intent" in content
+		assert "### What We Are Building" in content
+		assert "### Goals" in content
 
 	def test_skips_existing_abpg(self, tmp_path):
 		(tmp_path / "docs").mkdir()
 		(tmp_path / "docs" / "as-built-project-guide.md").write_text("custom guide")
 		spellforge.write_agent_docs(tmp_path)
 		assert (tmp_path / "docs" / "as-built-project-guide.md").read_text() == "custom guide"
+
+
+# =============================================================================
+# prompt_design_intent
+# =============================================================================
+
+
+class TestPromptDesignIntent:
+	"""prompt_design_intent edits the as-built placeholder in place rather than
+	rewriting the whole file, so the rest of the template survives untouched."""
+
+	def test_description_replaces_placeholder(self, tmp_path, monkeypatch):
+		(tmp_path / "docs").mkdir()
+		spellforge.write_agent_docs(tmp_path)
+		monkeypatch.setattr("builtins.input", lambda _: "a tool that does X")
+
+		spellforge.prompt_design_intent(tmp_path)
+
+		content = (tmp_path / "docs" / "as-built-project-guide.md").read_text()
+		assert "a tool that does X" in content
+		assert "_Describe what this project does in one sentence._" not in content
+
+	def test_description_preserves_other_sections(self, tmp_path, monkeypatch):
+		(tmp_path / "docs").mkdir()
+		spellforge.write_agent_docs(tmp_path)
+		monkeypatch.setattr("builtins.input", lambda _: "a tool that does X")
+
+		spellforge.prompt_design_intent(tmp_path)
+
+		content = (tmp_path / "docs" / "as-built-project-guide.md").read_text()
+		assert "## Directory Structure" in content
+		assert "## Architecture Decisions" in content
+
+	def test_empty_description_leaves_placeholder(self, tmp_path, monkeypatch):
+		(tmp_path / "docs").mkdir()
+		spellforge.write_agent_docs(tmp_path)
+		monkeypatch.setattr("builtins.input", lambda _: "")
+
+		spellforge.prompt_design_intent(tmp_path)
+
+		content = (tmp_path / "docs" / "as-built-project-guide.md").read_text()
+		assert "_Describe what this project does in one sentence._" in content
 
 
 # =============================================================================

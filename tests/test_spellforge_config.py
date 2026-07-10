@@ -118,12 +118,6 @@ class TestClaudeMd:
 			"'## Project Documentation' section missing from CLAUDE.md"
 		)
 
-	def test_claude_md_references_prd(self):
-		"""CLAUDE.md must reference docs/prd.md so Claude reads project requirements."""
-		assert "docs/prd.md" in self._get_content(), (
-			"docs/prd.md not referenced in CLAUDE.md — Claude won't read project requirements"
-		)
-
 	def test_claude_md_references_as_built_guide(self):
 		"""CLAUDE.md must reference docs/as-built-project-guide.md."""
 		assert "docs/as-built-project-guide.md" in self._get_content(), (
@@ -204,33 +198,37 @@ class TestClaudeMd:
 
 # =============================================================================
 # DOCS
-# Verifies that prd.md and as-built-project-guide.md were written correctly
-# with the expected structure that Claude Code relies on.
+# Verifies that as-built-project-guide.md was written correctly with the
+# expected structure that Claude Code relies on.
 # =============================================================================
 
 
 class TestDocs:
 	"""Verify docs/ files contain the expected structure."""
 
-	def test_prd_has_what_we_are_building_section(self):
-		"""prd.md must have a 'What We Are Building' section."""
-		prd = PROJECT_ROOT / "docs" / "prd.md"
-		assert prd.exists(), "docs/prd.md does not exist"
-		assert "## What We Are Building" in prd.read_text(), (
-			"'## What We Are Building' section missing from prd.md"
+	def test_as_built_guide_has_design_intent_section(self):
+		"""as-built-project-guide.md must have a Design Intent section."""
+		abpg = PROJECT_ROOT / "docs" / "as-built-project-guide.md"
+		assert abpg.exists(), "docs/as-built-project-guide.md does not exist"
+		assert "## Design Intent" in abpg.read_text(), (
+			"'## Design Intent' section missing from as-built-project-guide.md"
 		)
 
-	def test_prd_has_goals_section(self):
-		"""prd.md must have a Goals section."""
-		prd = PROJECT_ROOT / "docs" / "prd.md"
-		assert prd.exists(), "docs/prd.md does not exist"
-		assert "## Goals" in prd.read_text(), "'## Goals' section missing from prd.md"
+	def test_as_built_guide_has_what_we_are_building_section(self):
+		"""as-built-project-guide.md must have a 'What We Are Building' section."""
+		abpg = PROJECT_ROOT / "docs" / "as-built-project-guide.md"
+		assert abpg.exists(), "docs/as-built-project-guide.md does not exist"
+		assert "### What We Are Building" in abpg.read_text(), (
+			"'### What We Are Building' section missing from as-built-project-guide.md"
+		)
 
-	def test_prd_references_80_percent_coverage(self):
-		"""prd.md Definition of Done must reference the 80% coverage requirement."""
-		prd = PROJECT_ROOT / "docs" / "prd.md"
-		assert prd.exists(), "docs/prd.md does not exist"
-		assert "80%" in prd.read_text(), "80% coverage requirement not in prd.md Definition of Done"
+	def test_as_built_guide_has_goals_section(self):
+		"""as-built-project-guide.md must have a Goals section."""
+		abpg = PROJECT_ROOT / "docs" / "as-built-project-guide.md"
+		assert abpg.exists(), "docs/as-built-project-guide.md does not exist"
+		assert "### Goals" in abpg.read_text(), (
+			"'### Goals' section missing from as-built-project-guide.md"
+		)
 
 	def test_as_built_guide_has_directory_structure_section(self):
 		"""as-built-project-guide.md must have a Directory Structure section."""

@@ -1,23 +1,29 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(git remote:*)",
-      "Bash(git push:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(ssh-add:*)",
-      "Bash(python3:*)",
-      "Bash(python:*)",
-      "Bash(pip install:*)",
-      "Bash(pip show:*)",
-      "Bash(source:*)",
-      "Bash(curl:*)",
-      "Bash(grep:*)",
-      "Bash(pgrep:*)",
-      "Bash(ls:*)",
-      "Bash(ruff check:*)",
-      "Bash(ruff format:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
-    ]
-  }
+	"permissions": {
+		"allow": [
+			"Bash(git remote:*)",
+			"Bash(git push:*)",
+			"Bash(git add:*)",
+			"Bash(git commit:*)",
+			"Bash(ssh-add:*)",
+			"Bash(python3:*)",
+			"Bash(python:*)",
+			"Bash(pip install:*)",
+			"Bash(pip show:*)",
+			"Bash(source:*)",
+			"Bash(curl:*)",
+			"Bash(grep:*)",
+			"Bash(pgrep:*)",
+			"Bash(ls:*)",
+			"Bash(ruff check:*)",
+			"Bash(ruff format:*)",
+			"WebFetch(domain:raw.githubusercontent.com)"
+		],
+		"ask": [
+			"Bash(pytest:*)",
+			"Bash(python3 -m pytest:*)",
+			"Bash(python -m pytest:*)",
+			"Bash(.venv/bin/pytest:*)"
+		]
+	}
 }

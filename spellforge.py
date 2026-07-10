@@ -32,6 +32,18 @@ PYTHON_TARGET_BIN_NAME = f"python{PYTHON_TARGET_LABEL}"  # e.g. "python3.13"
 PYTHON_TARGET_BREW_FORMULA = f"python@{PYTHON_TARGET_LABEL}"  # e.g. "python@3.13"
 
 # =============================================================================
+# PACKAGE MANAGER CHOICE
+# Spellforge supports two package managers for venv creation and installs:
+# pip (the classic default, always available once Python is) and uv (a much
+# faster Rust-based drop-in). The user picks one on the installation menu;
+# repair mode auto-detects the prior choice from the existing venv instead
+# of re-prompting (see _detect_venv_package_manager()).
+# =============================================================================
+
+PACKAGE_MANAGER_PIP = "pip"
+PACKAGE_MANAGER_UV = "uv"
+
+# =============================================================================
 # ANSI COLOR HELPERS
 # These let us print colorful, formatted output to the terminal.
 # =============================================================================
@@ -462,6 +474,45 @@ def ensure_python():
 	)
 
 
+def ensure_uv() -> str:
+	"""
+	Ensure the uv package manager is available, and return its absolute path.
+
+	Only called when the user chose uv on the installation menu. Installs via
+	Homebrew if available; otherwise fatals with a manual-install pointer,
+	matching ensure_python()'s no-brew fallback style. We deliberately do not
+	auto-run uv's `curl | sh` install script.
+
+	Returns:
+	    Absolute path to the uv executable.
+	"""
+	step("⚡", "uv (Package Manager)")
+
+	existing = shutil.which("uv")
+	if existing:
+		result = run([existing, "--version"], capture=True, check=False)
+		success(f"uv already installed: {(result.stdout or result.stderr).strip()}")
+		return existing
+
+	if brew_available():
+		warning("uv not found - installing via Homebrew...")
+		run(["brew", "install", "uv"])
+		installed = shutil.which("uv")
+		if installed:
+			success("uv installed successfully!")
+			return installed
+		fatal("Homebrew reported success but uv was not found on PATH. Try: brew reinstall uv")
+
+	fatal(
+		"uv is required (you chose it as your package manager) but was not\n"
+		"  found, and Homebrew is not available to install it automatically.\n\n"
+		"  Options:\n"
+		"    • Install Homebrew (https://brew.sh) and re-run Spellforge\n"
+		"    • Install uv manually: https://docs.astral.sh/uv/getting-started/installation/\n"
+		"    • Re-run Spellforge and choose pip instead"
+	)
+
+
 def _venv_python_version(venv_path: Path) -> tuple[int, int] | None:
 	"""
 	Return the (major, minor) version tuple of the Python inside an existing
@@ -485,7 +536,35 @@ def _venv_python_version(venv_path: Path) -> tuple[int, int] | None:
 		return None
 
 
-def create_venv(project_path: Path, python_bin: str):
+def _detect_venv_package_manager(venv_path: Path) -> str:
+	"""
+	Detect which package manager created an existing venv, by reading its
+	pyvenv.cfg. uv stamps an extra `uv = <version>` line into pyvenv.cfg that
+	the stdlib `venv` module never writes; its presence is the signal.
+
+	Used by repair mode, which is non-interactive and has no InstallChoices
+	to read the original selection from — this lets `--repair` re-target the
+	same package manager the project was originally bootstrapped with instead
+	of silently defaulting back to pip.
+
+	Args:
+	    venv_path: Path to the venv directory (containing pyvenv.cfg).
+
+	Returns:
+	    PACKAGE_MANAGER_UV if pyvenv.cfg has a `uv = ` line, else
+	    PACKAGE_MANAGER_PIP (also the fallback when pyvenv.cfg is missing).
+	"""
+	pyvenv_cfg = venv_path / "pyvenv.cfg"
+	if not pyvenv_cfg.exists():
+		return PACKAGE_MANAGER_PIP
+
+	for line in pyvenv_cfg.read_text().splitlines():
+		if line.strip().startswith("uv "):
+			return PACKAGE_MANAGER_UV
+	return PACKAGE_MANAGER_PIP
+
+
+def create_venv(project_path: Path, python_bin: str, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Create a Python virtual environment inside the project directory.
 
@@ -498,14 +577,19 @@ def create_venv(project_path: Path, python_bin: str):
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	    python_bin: Absolute path to the pinned-version python3 executable.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV. Selects
+	        `python -m venv` vs `uv venv` for creation. A uv-created venv has
+	        no pip installed by default — package installs go through uv
+	        instead (see _install_packages()).
 
 	Returns:
-	    Path to the venv's pip executable (used for package installs).
+	    Path to the venv's python3 executable (used to derive all other venv
+	    binary paths and to drive package installs).
 	"""
 	step("📦", "Python Virtual Environment")
 
 	venv_path = project_path / ".venv"
-	pip_bin = venv_path / "bin" / "pip"
+	venv_python_bin = venv_path / "bin" / "python3"
 
 	if venv_path.exists():
 		existing_version = _venv_python_version(venv_path)
@@ -530,10 +614,13 @@ def create_venv(project_path: Path, python_bin: str):
 		)
 	else:
 		info(f"Creating virtual environment at {venv_path} (using {python_bin})...")
-		run([python_bin, "-m", "venv", str(venv_path)])
+		if package_manager == PACKAGE_MANAGER_UV:
+			run(["uv", "venv", "--python", python_bin, str(venv_path)])
+		else:
+			run([python_bin, "-m", "venv", str(venv_path)])
 		success("Virtual environment created!")
 
-	return str(pip_bin)
+	return str(venv_python_bin)
 
 
 # =============================================================================
@@ -547,14 +634,6 @@ def create_venv(project_path: Path, python_bin: str):
 # (strict venv isolation), (b) passing --no-user --isolated, and (c)
 # stripping the redirecting env vars from the subprocess environment.
 # =============================================================================
-
-
-def _venv_python_from_pip_bin(pip_bin: str) -> str:
-	"""
-	Derive the venv's python3 executable from the venv's pip path.
-	Both live in the same bin/ directory.
-	"""
-	return str(Path(pip_bin).parent / "python3")
 
 
 def _isolated_pip_env() -> dict:
@@ -574,59 +653,89 @@ def _isolated_pip_env() -> dict:
 	return env
 
 
-def _pip_install(pip_bin: str, packages: list[str], upgrade_pip_first: bool = False):
+def _install_packages(
+	venv_python_bin: str,
+	packages: list[str],
+	package_manager: str = PACKAGE_MANAGER_PIP,
+	upgrade_pip_first: bool = False,
+):
 	"""
-	Install packages into the venv using strict isolation.
+	Install packages into the venv using the chosen package manager.
 
-	Uses `<venv>/bin/python3 -m pip install --no-user --isolated <packages>`
+	pip: `<venv>/bin/python3 -m pip install --no-user --isolated <packages>`
 	with PIP_USER=0 and PIP_TARGET/PIP_PREFIX stripped, so the install lands
 	in the venv's site-packages regardless of user-level pip config.
 
+	uv: `uv pip install --python <venv>/bin/python3 <packages>`. uv targets
+	an arbitrary venv by interpreter path rather than by being invoked from
+	inside it, and has no equivalent user-config redirection to defend
+	against, so no isolation env is needed.
+
 	Args:
-	    pip_bin: Path to the venv's pip executable (used to derive python3).
+	    venv_python_bin: Path to the venv's python3 executable.
 	    packages: List of package specifiers to install.
-	    upgrade_pip_first: If True, run `pip install --upgrade pip` first.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
+	    upgrade_pip_first: If True (pip only), run `pip install --upgrade pip`
+	        first. uv has no pip to upgrade, so this is a no-op under uv.
 	"""
-	venv_python = _venv_python_from_pip_bin(pip_bin)
+	if package_manager == PACKAGE_MANAGER_UV:
+		run(["uv", "pip", "install", "--python", venv_python_bin] + packages)
+		return
+
 	env = _isolated_pip_env()
 
 	if upgrade_pip_first:
 		run(
-			[venv_python, "-m", "pip", "install", "--no-user", "--isolated", "--upgrade", "pip"],
+			[
+				venv_python_bin,
+				"-m",
+				"pip",
+				"install",
+				"--no-user",
+				"--isolated",
+				"--upgrade",
+				"pip",
+			],
 			env=env,
 		)
 
 	run(
-		[venv_python, "-m", "pip", "install", "--no-user", "--isolated"] + packages,
+		[venv_python_bin, "-m", "pip", "install", "--no-user", "--isolated"] + packages,
 		env=env,
 	)
 
 
-def install_base_packages(pip_bin: str, project_path: Path):
+def install_base_packages(
+	venv_python_bin: str, project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP
+):
 	"""
 	Install the base package set into the project venv.
 
-	Uses strict pip isolation (see _pip_install) so installs land in the venv
-	regardless of user-level pip.conf or PIP_USER environment variables.
+	Uses strict pip isolation (see _install_packages) so installs land in the
+	venv regardless of user-level pip.conf or PIP_USER environment variables.
 
 	Args:
-	    pip_bin: Path to the venv's pip executable.
+	    venv_python_bin: Path to the venv's python3 executable.
 	    project_path: Used for display/context only.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	step("📚", "Installing Base Packages")
 
 	info(f"Packages to install: {C.YELLOW}{', '.join(BASE_PACKAGES)}{C.RESET}")
 
-	# Upgrade pip first then install — both in a single helper call
-	info("Upgrading pip and installing base packages (isolated from user pip.conf)...")
-	_pip_install(pip_bin, BASE_PACKAGES, upgrade_pip_first=True)
+	info(f"Installing base packages via {package_manager}...")
+	_install_packages(venv_python_bin, BASE_PACKAGES, package_manager, upgrade_pip_first=True)
 
 	success(f"All {len(BASE_PACKAGES)} base packages installed!")
 
-	# Show what's installed so the user has a clear record
+	# Show what's installed so the user has a clear record.
+	# uv-created venvs have no pip binary, so freeze the same way we installed.
 	info("Installed package versions:")
-	venv_python = _venv_python_from_pip_bin(pip_bin)
-	result = run([venv_python, "-m", "pip", "freeze"], capture=True, check=False)
+	if package_manager == PACKAGE_MANAGER_UV:
+		freeze_cmd = ["uv", "pip", "freeze", "--python", venv_python_bin]
+	else:
+		freeze_cmd = [venv_python_bin, "-m", "pip", "freeze"]
+	result = run(freeze_cmd, capture=True, check=False)
 	for line in result.stdout.strip().splitlines():
 		# Only show our base packages, not pip's own deps
 		if any(pkg.lower().replace("-", "_") in line.lower() for pkg in BASE_PACKAGES):
@@ -640,14 +749,16 @@ def install_base_packages(pip_bin: str, project_path: Path):
 # =============================================================================
 
 
-def install_detect_secrets(pip_bin: str):
+def install_detect_secrets(venv_python_bin: str, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Install detect-secrets for pre-commit secret scanning.
 	Tries Homebrew first (preferred, system-wide) when brew is available.
-	Falls back to pip into the venv (with isolation) otherwise.
+	Falls back to the venv (with isolation) otherwise.
 
 	Args:
-	    pip_bin: Path to the venv pip, used as fallback install target.
+	    venv_python_bin: Path to the venv's python3 executable, used as
+	        fallback install target.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 
 	Returns:
 	    Path string to the detect-secrets executable that was installed.
@@ -673,24 +784,26 @@ def install_detect_secrets(pip_bin: str):
 		else:
 			warning("Homebrew install failed - falling back to pip install into venv.")
 	else:
-		info("Homebrew not available - installing detect-secrets via pip into venv.")
+		info("Homebrew not available - installing detect-secrets into venv.")
 
-	# ── Fallback: install into the venv via pip (isolated) ────────────────────
-	info("Installing detect-secrets into venv via pip...")
-	_pip_install(pip_bin, ["detect-secrets"])
+	# ── Fallback: install into the venv ────────────────────────────────────────
+	info(f"Installing detect-secrets into venv via {package_manager}...")
+	_install_packages(venv_python_bin, ["detect-secrets"], package_manager)
 
-	# The venv bin directory is one level up from pip itself
-	venv_bin_dir = Path(pip_bin).parent
+	# The venv bin directory is one level up from python3 itself
+	venv_bin_dir = Path(venv_python_bin).parent
 	detect_secrets_bin = str(venv_bin_dir / "detect-secrets")
 
 	if not Path(detect_secrets_bin).exists():
-		fatal("detect-secrets install failed via both Homebrew and pip. Cannot continue.")
+		fatal(
+			f"detect-secrets install failed via both Homebrew and {package_manager}. Cannot continue."
+		)
 
-	success(f"detect-secrets installed via pip: {detect_secrets_bin}")
+	success(f"detect-secrets installed via {package_manager}: {detect_secrets_bin}")
 	return detect_secrets_bin
 
 
-def _resolve_detect_secrets_bin(pip_bin: str) -> str:
+def _resolve_detect_secrets_bin(venv_python_bin: str) -> str:
 	"""
 	Resolve an existing detect-secrets binary path WITHOUT triggering an install.
 
@@ -700,14 +813,14 @@ def _resolve_detect_secrets_bin(pip_bin: str) -> str:
 	preference), then the venv. Fatals if neither exists.
 
 	Args:
-	    pip_bin: Path to the venv pip — used to derive the venv bin directory
-	             where a pip-installed detect-secrets would live.
+	    venv_python_bin: Path to the venv's python3 executable — used to derive
+	        the venv bin directory where an installed detect-secrets would live.
 	"""
 	brew_path = shutil.which("detect-secrets")
 	if brew_path:
 		return brew_path
 
-	venv_path = str(Path(pip_bin).parent / "detect-secrets")
+	venv_path = str(Path(venv_python_bin).parent / "detect-secrets")
 	if Path(venv_path).exists():
 		return venv_path
 
@@ -934,8 +1047,7 @@ def create_directory_structure(project_path: Path):
 
 	    .claude/                      ← Claude Code config (settings.local.json)
 	    docs/
-	        prd.md                    ← Product Requirements Doc
-	        as-built-project-guide.md ← as-built project guide architecture document
+	        as-built-project-guide.md ← design intent + discovery + architecture guide
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1003,7 +1115,17 @@ def write_settings_local(project_path: Path):
 				"Bash(ruff format:*)",
 				# Allow fetching from GitHub raw content (common for scripts/configs)
 				"WebFetch(domain:raw.githubusercontent.com)",
-			]
+			],
+			# Tests must never run silently. "Bash(python3:*)" above is broad
+			# enough to swallow "python3 -m pytest ...", so these narrower,
+			# more specific rules force a prompt for every test invocation
+			# regardless of how pytest is called.
+			"ask": [
+				"Bash(pytest:*)",
+				"Bash(python3 -m pytest:*)",
+				"Bash(python -m pytest:*)",
+				"Bash(.venv/bin/pytest:*)",
+			],
 		},
 	}
 
@@ -1031,9 +1153,8 @@ def write_claude_md(project_path: Path):
 This file provides essential context for Claude Code when working on this project.
 
 ## Project Documentation
-The following files contain critical project information:
-- @docs/prd.md - Product Requirements Document with goals, features, and technical requirements
-- @docs/as-built-project-guide.md - Combined discovery and architecture guide. **Read this before implementing anything new** to find what already exists, understand architecture decisions, and follow established patterns.
+The following file contains critical project information:
+- @docs/as-built-project-guide.md - Design intent, discovery, and architecture guide. **Read this before implementing anything new** to understand why the project exists, find what already exists, and follow established patterns.
 
 ## Development Environment
 **Platform**: macOS
@@ -1125,10 +1246,11 @@ The as-built project guide is the primary discovery document for finding existin
 
 def write_agent_docs(project_path: Path):
 	"""
-	Create the docs/ documentation files that CLAUDE.md references.
-	Writes two files:
-	  - prd.md                    product requirements document
-	  - as-built-project-guide.md combined discovery + architecture doc
+	Create docs/as-built-project-guide.md, the single documentation file
+	CLAUDE.md references. It combines discovery/architecture content with a
+	"Design Intent" section (what the project is and why it exists), so
+	there is one living document instead of a separate requirements doc that
+	drifts out of sync with the code.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
@@ -1137,53 +1259,24 @@ def write_agent_docs(project_path: Path):
 
 	docs_path = project_path / "docs"
 
-	# ── prd.md ────────────────────────────────────────────────────────────────
-	prd_path = docs_path / "prd.md"
-	if not prd_path.exists():
-		prd_path.write_text(
-			"# Product Requirements Document\n\n"
-			"## What We Are Building\n\n"
-			"> Describe what this project does in one sentence.\n\n"
-			"## Problem We Are Solving\n\n"
-			"- [ ] What pain point does this eliminate?\n"
-			"- [ ] Who experiences this pain?\n"
-			"- [ ] What does success look like for the user?\n\n"
-			"## Goals\n\n"
-			"- [ ] Define primary goals here\n\n"
-			"## Features\n\n"
-			"- [ ] List key features here\n\n"
-			"## Technical Requirements\n\n"
-			"- [ ] List technical requirements here\n\n"
-			"## Out of Scope\n\n"
-			"- [ ] List what is explicitly not included here\n\n"
-			"## Definition of Done\n\n"
-			"- All acceptance criteria met\n"
-			"- All tests pass with minimum 80% coverage\n"
-			"- No linter, formatter, or type checker issues\n"
-			"- docs/as-built-project-guide.md updated to reflect changes\n"
-		)
-		success(f"Written: {prd_path}")
-	else:
-		warning(f"Already exists - skipping: {prd_path}")
-
 	# ── as-built-project-guide.md ─────────────────────────────────────────────
-	# Combines what were previously three separate files:
-	#   project-guide.md + as-built.md + project-guide-instructions.md
 	abpg_path = docs_path / "as-built-project-guide.md"
 	if not abpg_path.exists():
 		abpg_path.write_text(
 			"# As-Built Project Guide\n\n"
-			"> This document serves two purposes:\n"
-			"> 1. **Discovery** - find what exists before building something new\n"
-			"> 2. **Architecture** - document how systems are built and why\n"
+			"> This document serves three purposes:\n"
+			"> 1. **Design Intent** - what this project is and why it exists\n"
+			"> 2. **Discovery** - find what exists before building something new\n"
+			"> 3. **Architecture** - document how systems are built and why\n"
 			">\n"
 			"> Update this file with every commit. Keep it minimal and scannable.\n\n"
 			"---\n\n"
 			"## How to Maintain This Document\n\n"
 			"Before committing, ask: did I add, remove, or move any systems, "
-			"components, or endpoints?\n"
+			"components, or endpoints? Did the project's goals or scope change?\n"
 			"If yes - update the relevant section below before committing.\n\n"
 			"Include:\n"
+			"- What the project is and why it exists, updated as scope evolves\n"
 			"- Folder-level structure (not individual files)\n"
 			"- Major systems with their entry points and key functions\n"
 			"- API endpoints with input shape and purpose\n"
@@ -1193,6 +1286,21 @@ def write_agent_docs(project_path: Path):
 			"- Implementation details (read the code)\n"
 			"- Generic framework conventions (project-specific only)\n\n"
 			"---\n\n"
+			"## Design Intent\n\n"
+			"### What We Are Building\n\n"
+			"_Describe what this project does in one sentence._\n\n"
+			"### Problem We Are Solving\n\n"
+			"- [ ] What pain point does this eliminate?\n"
+			"- [ ] Who experiences this pain?\n"
+			"- [ ] What does success look like for the user?\n\n"
+			"### Goals\n\n"
+			"- [ ] Define primary goals here\n\n"
+			"### Features\n\n"
+			"- [ ] List key features here\n\n"
+			"### Technical Requirements\n\n"
+			"- [ ] List technical requirements here\n\n"
+			"### Out of Scope\n\n"
+			"- [ ] List what is explicitly not included here\n\n"
 			"## Directory Structure\n\n"
 			"_Document your folder layout here._\n\n"
 			"## Systems\n\n"
@@ -1497,7 +1605,7 @@ def print_summary(project_path: Path):
   {C.GREEN}✔{C.RESET}  Claude Code (global npm install)
   {C.GREEN}✔{C.RESET}  .claude/settings.local.json (Claude Code permissions)
   {C.GREEN}✔{C.RESET}  CLAUDE.md (Claude Code project context)
-  {C.GREEN}✔{C.RESET}  docs/ (prd.md, as-built-project-guide.md)
+  {C.GREEN}✔{C.RESET}  docs/ (as-built-project-guide.md)
   {C.GREEN}✔{C.RESET}  .git/hooks/pre-commit (ruff format/check + secret scanning before commit)
 """)
 
@@ -1511,8 +1619,8 @@ def print_summary(project_path: Path):
   2. {C.CYAN}source .venv/bin/activate{C.RESET}   ← activate your virtual environment
   3. {C.CYAN}pytest tests/ -v{C.RESET}             ← verify everything is working
   4. {C.CYAN}claude{C.RESET}                       ← start a Claude Code session
-  5. Fill in {C.YELLOW}docs/prd.md{C.RESET} with your project goals
-  6. Fill in {C.YELLOW}docs/as-built-project-guide.md{C.RESET} as you build
+  5. Fill in the {C.YELLOW}Design Intent{C.RESET} section of {C.YELLOW}docs/as-built-project-guide.md{C.RESET} with your project goals
+  6. Keep the rest of {C.YELLOW}docs/as-built-project-guide.md{C.RESET} updated as you build
 
 {C.YELLOW}{C.BOLD}Testing setup required:{C.RESET}
   The pre-commit hook runs Ruff + secret scanning only — pytest never fires on commit.
@@ -1532,10 +1640,11 @@ def print_summary(project_path: Path):
 
 
 # =============================================================================
-# PROJECT NAME + PRD PROMPT
+# PROJECT NAME + DESIGN INTENT PROMPT
 # Ask the user for their project name (used in pyproject.toml) and a brief
-# description of what they are building (written into prd.md as a starting
-# point so Claude Code has real context from day one).
+# description of what they are building (written into as-built's Design
+# Intent section as a starting point so Claude Code has real context from
+# day one).
 # =============================================================================
 
 
@@ -1564,18 +1673,22 @@ def get_project_name(project_path: Path) -> str:
 	return project_name
 
 
-def prompt_prd(project_path: Path, project_name: str):
+def prompt_design_intent(project_path: Path):
 	"""
 	Ask the user for a short description of what they are building and
-	write it into docs/prd.md as a starting point. Claude Code reads
-	this file at the start of every session, so even a rough description
-	dramatically improves the quality of AI assistance.
+	fill it into the "What We Are Building" placeholder under as-built's
+	Design Intent section. Claude Code reads this file at the start of
+	every session, so even a rough description dramatically improves the
+	quality of AI assistance.
+
+	Edits the file in place (rather than rewriting it) so the Directory
+	Structure / Systems / Architecture Decisions sections that
+	write_agent_docs() already wrote are left untouched.
 
 	Args:
-	    project_path:  The resolved Path to the project root directory.
-	    project_name:  Inserted as the PRD heading.
+	    project_path: The resolved Path to the project root directory.
 	"""
-	step("📄", "Product Requirements Document (docs/prd.md)")
+	step("📄", "Design Intent (docs/as-built-project-guide.md)")
 
 	print(f"""
   {C.WHITE}What are you building?{C.RESET}
@@ -1586,52 +1699,26 @@ def prompt_prd(project_path: Path, project_name: str):
 
 	description = input(f"  {C.BOLD}{C.MAGENTA}➜ Project description: {C.RESET}").strip()
 
-	prd_path = project_path / "docs" / "prd.md"
+	abpg_path = project_path / "docs" / "as-built-project-guide.md"
+	placeholder = "_Describe what this project does in one sentence._"
 
-	if description:
-		# Write a real PRD seed with the user's description
-		prd_content = f"""# Product Requirements Document - {project_name}
+	if not description:
+		warning("No description provided - Design Intent left as placeholder.")
+		info(f"Fill it in later at: {C.YELLOW}{abpg_path}{C.RESET}")
+		return
 
-## What We Are Building
+	if not abpg_path.exists():
+		fatal(f"{abpg_path} not found - write_agent_docs() should have created it first.")
 
-{description}
+	content = abpg_path.read_text()
+	if placeholder not in content:
+		warning("Design Intent placeholder not found - leaving as-built untouched.")
+		info(f"Add your description manually at: {C.YELLOW}{abpg_path}{C.RESET}")
+		return
 
-## Problem We Are Solving
-
-- [ ] What pain point does this eliminate?
-- [ ] Who experiences this pain?
-- [ ] What does success look like for the user?
-
-## Goals
-
-- [ ] Define primary goals here
-
-## Features
-
-- [ ] List key features here
-
-## Technical Requirements
-
-- [ ] List technical requirements here
-
-## Out of Scope
-
-- [ ] List what is explicitly not included here
-
-## Definition of Done
-
-- All acceptance criteria met
-- All tests pass with minimum 80% coverage
-- No linter, formatter, or type checker issues
-- docs/as-built-project-guide.md updated to reflect changes
-"""
-		prd_path.write_text(prd_content)
-		success(f"prd.md written with your description: {prd_path}")
-		info("Expand this file as the project takes shape.")
-	else:
-		# Leave the placeholder that write_agent_docs already created
-		warning("No description provided - prd.md left as placeholder.")
-		info(f"Fill it in later at: {C.YELLOW}{prd_path}{C.RESET}")
+	abpg_path.write_text(content.replace(placeholder, description, 1))
+	success(f"Design Intent updated with your description: {abpg_path}")
+	info("Expand the rest of the Design Intent section as the project takes shape.")
 
 
 # =============================================================================
@@ -1847,19 +1934,22 @@ def verify_tests_directory(project_path: Path):
 # =============================================================================
 
 
-def install_bandit(pip_bin: str, project_path: Path):
+def install_bandit(
+	venv_python_bin: str, project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP
+):
 	"""
-	Install bandit into the project venv via pip (isolated).
-	Bandit scans Python source for common security vulnerabilities -
-	hardcoded passwords, unsafe eval(), SQL injection patterns, weak crypto.
+	Install bandit into the project venv. Bandit scans Python source for
+	common security vulnerabilities - hardcoded passwords, unsafe eval(),
+	SQL injection patterns, weak crypto.
 
 	Args:
-	    pip_bin:      Path to the venv pip executable.
+	    venv_python_bin: Path to the venv's python3 executable.
 	    project_path: The resolved Path to the project root directory.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	step("🔐", "Bandit (Security Scanner)")
-	info("Installing bandit into venv via pip (isolated)...")
-	_pip_install(pip_bin, ["bandit"])
+	info(f"Installing bandit into venv via {package_manager}...")
+	_install_packages(venv_python_bin, ["bandit"], package_manager)
 
 	# Write a pyproject.toml bandit config section - skips test files
 	# since test code intentionally uses patterns bandit would flag
@@ -1881,18 +1971,19 @@ def install_bandit(pip_bin: str, project_path: Path):
 				f.write(bandit_config)
 			success(f"Bandit config appended to {pyproject_path}")
 
-	verify_bandit(pip_bin)
+	verify_bandit(venv_python_bin)
 
 
-def verify_bandit(pip_bin: str):
+def verify_bandit(venv_python_bin: str):
 	"""
 	Confirm bandit is installed in the venv and runnable.
 	Only called if the user opted in during the installation menu.
 
 	Args:
-	    pip_bin: Path to the venv pip, used to locate the bandit binary.
+	    venv_python_bin: Path to the venv's python3 executable, used to
+	        locate the bandit binary.
 	"""
-	bandit_bin = str(Path(pip_bin).parent / "bandit")
+	bandit_bin = str(Path(venv_python_bin).parent / "bandit")
 	if not Path(bandit_bin).exists():
 		fatal(f"Bandit verification failed - binary not found at {bandit_bin}")
 
@@ -2037,19 +2128,26 @@ def verify_python(python_bin: str | None = None):
 	)
 
 
-def verify_venv(project_path: Path):
+def verify_venv(project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Confirm the virtual environment was created correctly by checking that
-	the python3 and pip executables exist, are runnable, and that the venv
-	Python reports the pinned major.minor version.
+	python3 exists and is runnable, that the venv Python reports the pinned
+	major.minor version, and (pip only) that pip itself is present.
+
+	A uv-created venv has no pip binary by design — uv installs packages
+	directly against the venv's interpreter — so the pip-existence check is
+	skipped when package_manager is uv.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	venv_python = project_path / ".venv" / "bin" / "python3"
-	venv_pip = project_path / ".venv" / "bin" / "pip"
+	binaries_to_check = [venv_python]
+	if package_manager == PACKAGE_MANAGER_PIP:
+		binaries_to_check.append(project_path / ".venv" / "bin" / "pip")
 
-	for binary in [venv_python, venv_pip]:
+	for binary in binaries_to_check:
 		if not binary.exists():
 			fatal(f"Venv verification failed - {binary} does not exist.")
 		if not os.access(binary, os.X_OK):
@@ -2330,24 +2428,20 @@ def verify_claude_md(project_path: Path):
 
 def verify_agent_docs(project_path: Path):
 	"""
-	Confirm both docs/ documentation files exist and are non-empty.
-	These are referenced by CLAUDE.md and must be present for Claude Code
+	Confirm docs/as-built-project-guide.md exists and is non-empty.
+	It is referenced by CLAUDE.md and must be present for Claude Code
 	to find project context during sessions.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	"""
-	required_files = [
-		project_path / "docs" / "prd.md",
-		project_path / "docs" / "as-built-project-guide.md",
-	]
+	doc_path = project_path / "docs" / "as-built-project-guide.md"
 
-	for doc_path in required_files:
-		if not doc_path.exists():
-			fatal(f"Agent docs verification failed - missing: {doc_path}")
-		if doc_path.stat().st_size == 0:
-			fatal(f"Agent docs verification failed - file is empty: {doc_path}")
-		success(f"✔ Verified agent doc: {doc_path.name}")
+	if not doc_path.exists():
+		fatal(f"Agent docs verification failed - missing: {doc_path}")
+	if doc_path.stat().st_size == 0:
+		fatal(f"Agent docs verification failed - file is empty: {doc_path}")
+	success(f"✔ Verified agent doc: {doc_path.name}")
 
 
 def verify_precommit_hook(project_path: Path):
@@ -2410,6 +2504,9 @@ class InstallChoices:
 	"""
 
 	def __init__(self):
+		# Package manager for venv creation + installs - defaults to pip for
+		# backward compatibility; overwritten by the package manager page.
+		self.package_manager = PACKAGE_MANAGER_PIP
 		# Optional tools - default False until user opts in
 		self.eslint = False  # Frontend linter for JS/TS files
 		self.prettier = False  # Frontend formatter for JS/TS/HTML/CSS/MD
@@ -2538,6 +2635,35 @@ def show_installation_menu() -> InstallChoices:
 			f"  {C.YELLOW}★{C.RESET} {C.BOLD}{name:<22}{C.RESET} {C.YELLOW}{category:<26}{C.RESET} {why}"
 		)
 
+	press_any_key("  Press any key to choose a package manager...")
+
+	# Clear screen before the package manager section for a fresh view
+	print("\033[2J\033[H", end="")
+	banner()
+
+	# ── Prompt for package manager (pip vs uv) ────────────────────────────────
+	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+	print(f"  {C.BOLD}  PACKAGE MANAGER  (choose one){C.RESET}")
+	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+	print(f"  {C.MAGENTA}pip{C.RESET}  - The classic, always-available Python installer.")
+	print(f"  {C.MAGENTA}uv{C.RESET}   - A much faster Rust-based drop-in replacement for")
+	print("        pip and venv, installed via Homebrew if not already present.")
+	print()
+
+	while True:
+		answer = (
+			input(f"  {C.BOLD}{C.MAGENTA}>>> Use uv or pip? (uv/pip): {C.RESET}").strip().lower()
+		)
+		if answer in ("uv", "u"):
+			choices.package_manager = PACKAGE_MANAGER_UV
+			break
+		if answer in ("pip", "p"):
+			choices.package_manager = PACKAGE_MANAGER_PIP
+			break
+		warning(f"  '{answer}' is not a valid choice - enter 'uv' or 'pip'.")
+
+	success(f"  Using {choices.package_manager} for the virtual environment and installs.")
+
 	press_any_key("  Press any key to continue to optional tools...")
 
 	# Clear screen before the optional tools section for a fresh view
@@ -2583,6 +2709,10 @@ def show_installation_menu() -> InstallChoices:
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
 	print(f"  {C.BOLD}  Your installation plan:{C.RESET}")
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+
+	print(
+		f"  {C.GREEN}✔{C.RESET}  Package manager: {choices.package_manager} {C.BLUE}(your choice){C.RESET}"
+	)
 
 	for name, required, category, _, _ in TOOL_MANIFEST:
 		if required:
@@ -2639,22 +2769,26 @@ def do_fresh_install():
 	ensure_git()
 	verify_git()
 
+	# ── Package manager (uv only - pip ships with Python) ────────────────────
+	if choices.package_manager == PACKAGE_MANAGER_UV:
+		ensure_uv()
+
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
 	verify_python(python_bin)
-	pip_bin = create_venv(project_path, python_bin)
-	verify_venv(project_path)
+	venv_python_bin = create_venv(project_path, python_bin, choices.package_manager)
+	verify_venv(project_path, choices.package_manager)
 
 	# Add watchdog to install list if user opted in
 	if choices.watchdog:
 		info("Adding watchdog to install list (user opted in)...")
 		BASE_PACKAGES.append("watchdog")
 
-	install_base_packages(pip_bin, project_path)
+	install_base_packages(venv_python_bin, project_path, choices.package_manager)
 	verify_packages(project_path)
 
 	# ── detect-secrets ────────────────────────────────────────────────────────
-	detect_secrets_bin = install_detect_secrets(pip_bin)
+	detect_secrets_bin = install_detect_secrets(venv_python_bin, choices.package_manager)
 	verify_detect_secrets(detect_secrets_bin)
 	init_secrets_baseline(project_path, detect_secrets_bin)
 	verify_secrets_baseline(project_path)
@@ -2695,7 +2829,7 @@ def do_fresh_install():
 
 	# ── Bandit (optional) ────────────────────────────────────────────────────
 	if choices.bandit:
-		install_bandit(pip_bin, project_path)
+		install_bandit(venv_python_bin, project_path, choices.package_manager)
 
 	# ── Prettier (optional) ───────────────────────────────────────────────────
 	if choices.prettier:
@@ -2735,8 +2869,8 @@ def do_fresh_install():
 	write_agent_docs(project_path)
 	verify_agent_docs(project_path)
 
-	# ── PRD prompt ────────────────────────────────────────────────────────────
-	prompt_prd(project_path, project_name)
+	# ── Design intent prompt ──────────────────────────────────────────────────
+	prompt_design_intent(project_path)
 
 	# ── .gitignore ────────────────────────────────────────────────────────────
 	write_gitignore(project_path)
@@ -2794,9 +2928,18 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 
 	info(f"Repairing project at: {C.YELLOW}{target_path}{C.RESET}")
 
+	# Detect which package manager originally created this venv BEFORE any
+	# --rebuild-venv deletion below wipes the evidence (pyvenv.cfg). Repair
+	# mode is non-interactive, so this is the only way to know whether to
+	# re-target uv or pip without re-prompting.
+	venv_path = target_path / ".venv"
+	package_manager = _detect_venv_package_manager(venv_path)
+	info(f"Detected package manager: {C.YELLOW}{package_manager}{C.RESET}")
+	if package_manager == PACKAGE_MANAGER_UV:
+		ensure_uv()
+
 	# Optional venv nuke — useful when the existing venv is wrong-version or
 	# obviously broken and the user wants a clean rebuild.
-	venv_path = target_path / ".venv"
 	if rebuild_venv and venv_path.exists():
 		warning(f"--rebuild-venv specified - removing {venv_path}")
 		shutil.rmtree(venv_path)
@@ -2805,15 +2948,14 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
 	verify_python(python_bin)
-	pip_bin = create_venv(target_path, python_bin)
-	verify_venv(target_path)
+	venv_python_bin = create_venv(target_path, python_bin, package_manager)
+	verify_venv(target_path, package_manager)
 
 	# Detect whether watchdog was previously installed so we re-verify it.
 	# We check by looking inside the venv's site-packages rather than relying
 	# on a config file, since the user may have installed it manually.
-	venv_python = _venv_python_from_pip_bin(pip_bin)
 	watchdog_check = subprocess.run(
-		[venv_python, "-c", "import watchdog"],
+		[venv_python_bin, "-c", "import watchdog"],
 		capture_output=True,
 		check=False,
 	)
@@ -2821,7 +2963,7 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 		info("Detected existing watchdog install - including in re-verification.")
 		BASE_PACKAGES.append("watchdog")
 
-	install_base_packages(pip_bin, target_path)
+	install_base_packages(venv_python_bin, target_path, package_manager)
 	verify_packages(target_path)
 
 	# ── Regenerate the pre-commit hook ────────────────────────────────────────
@@ -2831,7 +2973,7 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	# regenerating it puts the quality gate back in working order. The hook
 	# content is path-derived so it's safe to overwrite even if the user
 	# manually customized it; we warn first.
-	detect_secrets_bin = _resolve_detect_secrets_bin(pip_bin)
+	detect_secrets_bin = _resolve_detect_secrets_bin(venv_python_bin)
 	hook_path = target_path / ".git" / "hooks" / "pre-commit"
 	if hook_path.exists():
 		info(f"Overwriting existing hook: {hook_path}")
