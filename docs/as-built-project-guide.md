@@ -1,9 +1,37 @@
 # As-Built Project Guide
 
-> **Maintenance instructions:** This is the combined discovery and architecture guide.
-> Update this document with every commit that adds, removes, or relocates systems, components, or settings.
-> Include only what is needed for **discovery** — folder-level layout, system entry points, key functions, and architecture decisions.
+> **Maintenance instructions:** This is the combined design-intent, discovery, and architecture guide.
+> Update this document with every commit that adds, removes, or relocates systems, components, or settings, or that changes the project's goals or scope.
+> Include only what is needed for **design intent** (what this project is and why) and **discovery** — folder-level layout, system entry points, key functions, and architecture decisions.
 > Do not document implementation details or individual file exports; reading the code handles that.
+
+## Design Intent
+
+### What We Are Building
+
+automated environment setup
+
+### Problem We Are Solving
+
+- [ ] What pain point does this eliminate?
+- [ ] Who experiences this pain?
+- [ ] What does success look like for the user?
+
+### Goals
+
+- [ ] Define primary goals here
+
+### Features
+
+- [ ] List key features here
+
+### Technical Requirements
+
+- [ ] List technical requirements here
+
+### Out of Scope
+
+- [ ] List what is explicitly not included here
 
 ## Directory Structure
 
@@ -26,8 +54,7 @@ spellforge/
 ├── .prettierignore           # Prettier ignore list (generated when frontend tools opted in)
 ├── eslint.config.js          # ESLint flat config v9+ (generated when frontend tools opted in)
 ├── docs/
-│   ├── prd.md                # Product Requirements Document
-│   └── as-built-project-guide.md  # This file
+│   └── as-built-project-guide.md  # This file — design intent, discovery, and architecture
 ├── images/                   # README assets
 ├── .claude/
 │   └── settings.local.json   # Claude Code permissions (no hooks; quality gate lives in git pre-commit)
