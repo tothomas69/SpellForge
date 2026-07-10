@@ -73,29 +73,30 @@ Single-file script that orchestrates all project setup. Two run modes, dispatche
 
 - `PYTHON_TARGET_MINOR`, `PYTHON_TARGET_LABEL`, `PYTHON_TARGET_BIN_NAME`, `PYTHON_TARGET_BREW_FORMULA` — Single source of truth for the pinned Python version (currently 3.13). Bumping the target is a one-line change.
 - `BASE_PACKAGES` — The list of packages installed into every new project venv.
+- `PACKAGE_MANAGER_PIP`, `PACKAGE_MANAGER_UV` — The two package manager choices for venv creation and installs.
 
 **Key classes:**
 
-- `InstallChoices` — Dataclass holding user selections from the interactive menu (which optional tools to install)
+- `InstallChoices` — Dataclass holding user selections from the interactive menu (which optional tools to install, plus `package_manager`)
 
 **Key entry-point functions:**
 
 - `do_fresh_install()` — The full interactive bootstrap flow.
-- `do_repair(target_path, rebuild_venv=False)` — Repair flow; runs only Python/venv/base-packages/pre-commit-hook steps.
+- `do_repair(target_path, rebuild_venv=False)` — Repair flow; runs only Python/venv/base-packages/pre-commit-hook steps. Auto-detects the project's original package manager (pip vs uv) from the existing venv rather than re-prompting.
 - `_parse_args()` — argparse dispatcher; `__main__` is just a thin shim over this.
 
 **Key functions:**
 
-- `show_installation_menu()` — Presents the interactive menu (paginated: required tools page → optional tools page → confirmation) and returns an `InstallChoices` instance
+- `show_installation_menu()` — Presents the interactive menu (paginated: required tools page → package manager page → optional tools page → confirmation) and returns an `InstallChoices` instance
 - `print_summary()` — Paginated final summary: page 1 shows what was installed, page 2 shows next steps, a "Testing setup required" notice (pytest is not automatic; user must replace placeholder, narrow `--cov`, and add CI), and useful paths
 - `press_any_key(prompt)` — UI helper that waits for a single keypress (raw terminal mode) to advance between pages
 - `banner()` — Clears the screen and prints the Spellforge header
-- `ensure_*()` — Verify a tool is installed, install it if missing (e.g., `ensure_homebrew()`, `ensure_python()`)
-- `install_*()` — Install a specific tool or dependency (e.g., `install_ruff()`, `install_detect_secrets()`)
+- `ensure_*()` — Verify a tool is installed, install it if missing (e.g., `ensure_homebrew()`, `ensure_python()`, `ensure_uv()`)
+- `install_*()` — Install a specific tool or dependency (e.g., `install_ruff()`, `install_detect_secrets()`), package-manager-aware via a `package_manager` parameter
 - `write_*()` — Generate configuration files with correct paths baked in (e.g., `write_pyproject_toml()`, `write_claude_md()`)
-- `verify_*()` — Post-install verification that a tool works correctly (e.g., `verify_git()`, `verify_ruff()`, `verify_packages()`)
+- `verify_*()` — Post-install verification that a tool works correctly (e.g., `verify_git()`, `verify_ruff()`, `verify_packages()`, `verify_venv()`)
 - `create_*()` — Create project scaffolding (e.g., `create_virtualenv()`, `create_git_hooks()`)
-- `_isolated_pip_env()`, `_pip_install()`, `_venv_python_version()` — Internal helpers that enforce strict pip isolation and version checks (see Architecture Decisions).
+- `_isolated_pip_env()`, `_install_packages()`, `_venv_python_version()`, `_detect_venv_package_manager()` — Internal helpers that enforce strict pip isolation, dispatch installs to pip or uv, and check/detect venv version and package manager (see Architecture Decisions).
 
 ## Architecture Decisions
 
@@ -104,7 +105,8 @@ Single-file script that orchestrates all project setup. Two run modes, dispatche
 - **Tab indentation enforced by Ruff** — All generated Python files and the bootstrapper itself use tabs, configured in pyproject.toml.
 - **detect-secrets via Homebrew with pip fallback** — Homebrew is the preferred installation method, but if unavailable, detect-secrets is installed via pip into the project virtualenv. The brew call is gated by `brew_available()` so machines without brew fall through to pip cleanly.
 - **Python version pinning (3.13.x)** — Spellforge refuses to bootstrap against an arbitrary `python3` on PATH. It searches for `python3.13` in standard locations (PATH, Apple Silicon and Intel brew keg paths, then `brew --prefix`), falling back to `brew install python@3.13` if needed. The target version is controlled by `PYTHON_TARGET_*` constants. Rationale: `brew install python3` tracks the latest formula (currently 3.14), which is too new for our typical dependency matrix.
-- **Strict pip isolation** — All package installs go through `_pip_install()`, which invokes `<venv>/bin/python3 -m pip install --no-user --isolated` with an environment that sets `PIP_USER=0` and `PIP_REQUIRE_VIRTUALENV=true` and strips `PIP_TARGET` / `PIP_PREFIX`. This prevents user-level pip configuration from redirecting installs outside the project venv (the original silent-failure mode).
+- **Strict pip isolation** — Under `PACKAGE_MANAGER_PIP`, `_install_packages()` invokes `<venv>/bin/python3 -m pip install --no-user --isolated` with an environment that sets `PIP_USER=0` and `PIP_REQUIRE_VIRTUALENV=true` and strips `PIP_TARGET` / `PIP_PREFIX`. This prevents user-level pip configuration from redirecting installs outside the project venv (the original silent-failure mode).
+- **pip vs uv package manager choice** — The installation menu has a dedicated page where the user picks `pip` (classic, always available once Python is) or `uv` (faster, Rust-based). `create_venv()` dispatches to `python -m venv` or `uv venv --python`; `_install_packages()` dispatches installs to isolated pip or `uv pip install --python <venv_python>`. A uv-created venv has no `pip` binary by design, so `verify_venv()` skips the pip-existence check under uv. Repair mode has no `InstallChoices` to read from (it's non-interactive), so `_detect_venv_package_manager()` reads the existing venv's `pyvenv.cfg` for uv's `uv = <version>` marker line — read _before_ any `--rebuild-venv` deletion, since that would destroy the evidence — and re-targets the same manager instead of silently defaulting back to pip.
 - **No silent reuse of wrong-version venvs** — `create_venv()` inspects an existing `.venv` via `_venv_python_version()`; if the venv's Python doesn't match `PYTHON_TARGET_MINOR`, Spellforge fatals with a "delete and rerun" message instead of proceeding.
 - **Repair mode is scope-restricted by design** — `do_repair()` only re-runs the Python/venv/base-packages steps and regenerates the git pre-commit hook (re-pointing it at the current ruff/detect-secrets paths). It deliberately does not regenerate project config or scaffolding, so it's safe to run against a project with local edits.
 - **Quality gate at pre-commit, not post-edit** — Ruff format + lint and detect-secrets scanning run as a single git pre-commit hook (`.git/hooks/pre-commit`), generated by `write_precommit_hook()`. Earlier versions ran ruff after every Claude file edit via a `PostToolUse` hook in `settings.local.json`; that was removed because it made editing sessions noticeably slow. Tests and coverage are not in the pre-commit hook — they run manually or in CI.

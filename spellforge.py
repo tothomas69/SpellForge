@@ -32,6 +32,18 @@ PYTHON_TARGET_BIN_NAME = f"python{PYTHON_TARGET_LABEL}"  # e.g. "python3.13"
 PYTHON_TARGET_BREW_FORMULA = f"python@{PYTHON_TARGET_LABEL}"  # e.g. "python@3.13"
 
 # =============================================================================
+# PACKAGE MANAGER CHOICE
+# Spellforge supports two package managers for venv creation and installs:
+# pip (the classic default, always available once Python is) and uv (a much
+# faster Rust-based drop-in). The user picks one on the installation menu;
+# repair mode auto-detects the prior choice from the existing venv instead
+# of re-prompting (see _detect_venv_package_manager()).
+# =============================================================================
+
+PACKAGE_MANAGER_PIP = "pip"
+PACKAGE_MANAGER_UV = "uv"
+
+# =============================================================================
 # ANSI COLOR HELPERS
 # These let us print colorful, formatted output to the terminal.
 # =============================================================================
@@ -462,6 +474,45 @@ def ensure_python():
 	)
 
 
+def ensure_uv() -> str:
+	"""
+	Ensure the uv package manager is available, and return its absolute path.
+
+	Only called when the user chose uv on the installation menu. Installs via
+	Homebrew if available; otherwise fatals with a manual-install pointer,
+	matching ensure_python()'s no-brew fallback style. We deliberately do not
+	auto-run uv's `curl | sh` install script.
+
+	Returns:
+	    Absolute path to the uv executable.
+	"""
+	step("⚡", "uv (Package Manager)")
+
+	existing = shutil.which("uv")
+	if existing:
+		result = run([existing, "--version"], capture=True, check=False)
+		success(f"uv already installed: {(result.stdout or result.stderr).strip()}")
+		return existing
+
+	if brew_available():
+		warning("uv not found - installing via Homebrew...")
+		run(["brew", "install", "uv"])
+		installed = shutil.which("uv")
+		if installed:
+			success("uv installed successfully!")
+			return installed
+		fatal("Homebrew reported success but uv was not found on PATH. Try: brew reinstall uv")
+
+	fatal(
+		"uv is required (you chose it as your package manager) but was not\n"
+		"  found, and Homebrew is not available to install it automatically.\n\n"
+		"  Options:\n"
+		"    • Install Homebrew (https://brew.sh) and re-run Spellforge\n"
+		"    • Install uv manually: https://docs.astral.sh/uv/getting-started/installation/\n"
+		"    • Re-run Spellforge and choose pip instead"
+	)
+
+
 def _venv_python_version(venv_path: Path) -> tuple[int, int] | None:
 	"""
 	Return the (major, minor) version tuple of the Python inside an existing
@@ -485,7 +536,35 @@ def _venv_python_version(venv_path: Path) -> tuple[int, int] | None:
 		return None
 
 
-def create_venv(project_path: Path, python_bin: str):
+def _detect_venv_package_manager(venv_path: Path) -> str:
+	"""
+	Detect which package manager created an existing venv, by reading its
+	pyvenv.cfg. uv stamps an extra `uv = <version>` line into pyvenv.cfg that
+	the stdlib `venv` module never writes; its presence is the signal.
+
+	Used by repair mode, which is non-interactive and has no InstallChoices
+	to read the original selection from — this lets `--repair` re-target the
+	same package manager the project was originally bootstrapped with instead
+	of silently defaulting back to pip.
+
+	Args:
+	    venv_path: Path to the venv directory (containing pyvenv.cfg).
+
+	Returns:
+	    PACKAGE_MANAGER_UV if pyvenv.cfg has a `uv = ` line, else
+	    PACKAGE_MANAGER_PIP (also the fallback when pyvenv.cfg is missing).
+	"""
+	pyvenv_cfg = venv_path / "pyvenv.cfg"
+	if not pyvenv_cfg.exists():
+		return PACKAGE_MANAGER_PIP
+
+	for line in pyvenv_cfg.read_text().splitlines():
+		if line.strip().startswith("uv "):
+			return PACKAGE_MANAGER_UV
+	return PACKAGE_MANAGER_PIP
+
+
+def create_venv(project_path: Path, python_bin: str, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Create a Python virtual environment inside the project directory.
 
@@ -498,14 +577,19 @@ def create_venv(project_path: Path, python_bin: str):
 	Args:
 	    project_path: The resolved Path to the project root directory.
 	    python_bin: Absolute path to the pinned-version python3 executable.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV. Selects
+	        `python -m venv` vs `uv venv` for creation. A uv-created venv has
+	        no pip installed by default — package installs go through uv
+	        instead (see _install_packages()).
 
 	Returns:
-	    Path to the venv's pip executable (used for package installs).
+	    Path to the venv's python3 executable (used to derive all other venv
+	    binary paths and to drive package installs).
 	"""
 	step("📦", "Python Virtual Environment")
 
 	venv_path = project_path / ".venv"
-	pip_bin = venv_path / "bin" / "pip"
+	venv_python_bin = venv_path / "bin" / "python3"
 
 	if venv_path.exists():
 		existing_version = _venv_python_version(venv_path)
@@ -530,10 +614,13 @@ def create_venv(project_path: Path, python_bin: str):
 		)
 	else:
 		info(f"Creating virtual environment at {venv_path} (using {python_bin})...")
-		run([python_bin, "-m", "venv", str(venv_path)])
+		if package_manager == PACKAGE_MANAGER_UV:
+			run(["uv", "venv", "--python", python_bin, str(venv_path)])
+		else:
+			run([python_bin, "-m", "venv", str(venv_path)])
 		success("Virtual environment created!")
 
-	return str(pip_bin)
+	return str(venv_python_bin)
 
 
 # =============================================================================
@@ -547,14 +634,6 @@ def create_venv(project_path: Path, python_bin: str):
 # (strict venv isolation), (b) passing --no-user --isolated, and (c)
 # stripping the redirecting env vars from the subprocess environment.
 # =============================================================================
-
-
-def _venv_python_from_pip_bin(pip_bin: str) -> str:
-	"""
-	Derive the venv's python3 executable from the venv's pip path.
-	Both live in the same bin/ directory.
-	"""
-	return str(Path(pip_bin).parent / "python3")
 
 
 def _isolated_pip_env() -> dict:
@@ -574,59 +653,89 @@ def _isolated_pip_env() -> dict:
 	return env
 
 
-def _pip_install(pip_bin: str, packages: list[str], upgrade_pip_first: bool = False):
+def _install_packages(
+	venv_python_bin: str,
+	packages: list[str],
+	package_manager: str = PACKAGE_MANAGER_PIP,
+	upgrade_pip_first: bool = False,
+):
 	"""
-	Install packages into the venv using strict isolation.
+	Install packages into the venv using the chosen package manager.
 
-	Uses `<venv>/bin/python3 -m pip install --no-user --isolated <packages>`
+	pip: `<venv>/bin/python3 -m pip install --no-user --isolated <packages>`
 	with PIP_USER=0 and PIP_TARGET/PIP_PREFIX stripped, so the install lands
 	in the venv's site-packages regardless of user-level pip config.
 
+	uv: `uv pip install --python <venv>/bin/python3 <packages>`. uv targets
+	an arbitrary venv by interpreter path rather than by being invoked from
+	inside it, and has no equivalent user-config redirection to defend
+	against, so no isolation env is needed.
+
 	Args:
-	    pip_bin: Path to the venv's pip executable (used to derive python3).
+	    venv_python_bin: Path to the venv's python3 executable.
 	    packages: List of package specifiers to install.
-	    upgrade_pip_first: If True, run `pip install --upgrade pip` first.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
+	    upgrade_pip_first: If True (pip only), run `pip install --upgrade pip`
+	        first. uv has no pip to upgrade, so this is a no-op under uv.
 	"""
-	venv_python = _venv_python_from_pip_bin(pip_bin)
+	if package_manager == PACKAGE_MANAGER_UV:
+		run(["uv", "pip", "install", "--python", venv_python_bin] + packages)
+		return
+
 	env = _isolated_pip_env()
 
 	if upgrade_pip_first:
 		run(
-			[venv_python, "-m", "pip", "install", "--no-user", "--isolated", "--upgrade", "pip"],
+			[
+				venv_python_bin,
+				"-m",
+				"pip",
+				"install",
+				"--no-user",
+				"--isolated",
+				"--upgrade",
+				"pip",
+			],
 			env=env,
 		)
 
 	run(
-		[venv_python, "-m", "pip", "install", "--no-user", "--isolated"] + packages,
+		[venv_python_bin, "-m", "pip", "install", "--no-user", "--isolated"] + packages,
 		env=env,
 	)
 
 
-def install_base_packages(pip_bin: str, project_path: Path):
+def install_base_packages(
+	venv_python_bin: str, project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP
+):
 	"""
 	Install the base package set into the project venv.
 
-	Uses strict pip isolation (see _pip_install) so installs land in the venv
-	regardless of user-level pip.conf or PIP_USER environment variables.
+	Uses strict pip isolation (see _install_packages) so installs land in the
+	venv regardless of user-level pip.conf or PIP_USER environment variables.
 
 	Args:
-	    pip_bin: Path to the venv's pip executable.
+	    venv_python_bin: Path to the venv's python3 executable.
 	    project_path: Used for display/context only.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	step("📚", "Installing Base Packages")
 
 	info(f"Packages to install: {C.YELLOW}{', '.join(BASE_PACKAGES)}{C.RESET}")
 
-	# Upgrade pip first then install — both in a single helper call
-	info("Upgrading pip and installing base packages (isolated from user pip.conf)...")
-	_pip_install(pip_bin, BASE_PACKAGES, upgrade_pip_first=True)
+	info(f"Installing base packages via {package_manager}...")
+	_install_packages(venv_python_bin, BASE_PACKAGES, package_manager, upgrade_pip_first=True)
 
 	success(f"All {len(BASE_PACKAGES)} base packages installed!")
 
-	# Show what's installed so the user has a clear record
+	# Show what's installed so the user has a clear record.
+	# uv-created venvs have no pip binary, so freeze the same way we installed.
 	info("Installed package versions:")
-	venv_python = _venv_python_from_pip_bin(pip_bin)
-	result = run([venv_python, "-m", "pip", "freeze"], capture=True, check=False)
+	if package_manager == PACKAGE_MANAGER_UV:
+		freeze_cmd = ["uv", "pip", "freeze", "--python", venv_python_bin]
+	else:
+		freeze_cmd = [venv_python_bin, "-m", "pip", "freeze"]
+	result = run(freeze_cmd, capture=True, check=False)
 	for line in result.stdout.strip().splitlines():
 		# Only show our base packages, not pip's own deps
 		if any(pkg.lower().replace("-", "_") in line.lower() for pkg in BASE_PACKAGES):
@@ -640,14 +749,16 @@ def install_base_packages(pip_bin: str, project_path: Path):
 # =============================================================================
 
 
-def install_detect_secrets(pip_bin: str):
+def install_detect_secrets(venv_python_bin: str, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Install detect-secrets for pre-commit secret scanning.
 	Tries Homebrew first (preferred, system-wide) when brew is available.
-	Falls back to pip into the venv (with isolation) otherwise.
+	Falls back to the venv (with isolation) otherwise.
 
 	Args:
-	    pip_bin: Path to the venv pip, used as fallback install target.
+	    venv_python_bin: Path to the venv's python3 executable, used as
+	        fallback install target.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 
 	Returns:
 	    Path string to the detect-secrets executable that was installed.
@@ -673,24 +784,26 @@ def install_detect_secrets(pip_bin: str):
 		else:
 			warning("Homebrew install failed - falling back to pip install into venv.")
 	else:
-		info("Homebrew not available - installing detect-secrets via pip into venv.")
+		info("Homebrew not available - installing detect-secrets into venv.")
 
-	# ── Fallback: install into the venv via pip (isolated) ────────────────────
-	info("Installing detect-secrets into venv via pip...")
-	_pip_install(pip_bin, ["detect-secrets"])
+	# ── Fallback: install into the venv ────────────────────────────────────────
+	info(f"Installing detect-secrets into venv via {package_manager}...")
+	_install_packages(venv_python_bin, ["detect-secrets"], package_manager)
 
-	# The venv bin directory is one level up from pip itself
-	venv_bin_dir = Path(pip_bin).parent
+	# The venv bin directory is one level up from python3 itself
+	venv_bin_dir = Path(venv_python_bin).parent
 	detect_secrets_bin = str(venv_bin_dir / "detect-secrets")
 
 	if not Path(detect_secrets_bin).exists():
-		fatal("detect-secrets install failed via both Homebrew and pip. Cannot continue.")
+		fatal(
+			f"detect-secrets install failed via both Homebrew and {package_manager}. Cannot continue."
+		)
 
-	success(f"detect-secrets installed via pip: {detect_secrets_bin}")
+	success(f"detect-secrets installed via {package_manager}: {detect_secrets_bin}")
 	return detect_secrets_bin
 
 
-def _resolve_detect_secrets_bin(pip_bin: str) -> str:
+def _resolve_detect_secrets_bin(venv_python_bin: str) -> str:
 	"""
 	Resolve an existing detect-secrets binary path WITHOUT triggering an install.
 
@@ -700,14 +813,14 @@ def _resolve_detect_secrets_bin(pip_bin: str) -> str:
 	preference), then the venv. Fatals if neither exists.
 
 	Args:
-	    pip_bin: Path to the venv pip — used to derive the venv bin directory
-	             where a pip-installed detect-secrets would live.
+	    venv_python_bin: Path to the venv's python3 executable — used to derive
+	        the venv bin directory where an installed detect-secrets would live.
 	"""
 	brew_path = shutil.which("detect-secrets")
 	if brew_path:
 		return brew_path
 
-	venv_path = str(Path(pip_bin).parent / "detect-secrets")
+	venv_path = str(Path(venv_python_bin).parent / "detect-secrets")
 	if Path(venv_path).exists():
 		return venv_path
 
@@ -1821,19 +1934,22 @@ def verify_tests_directory(project_path: Path):
 # =============================================================================
 
 
-def install_bandit(pip_bin: str, project_path: Path):
+def install_bandit(
+	venv_python_bin: str, project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP
+):
 	"""
-	Install bandit into the project venv via pip (isolated).
-	Bandit scans Python source for common security vulnerabilities -
-	hardcoded passwords, unsafe eval(), SQL injection patterns, weak crypto.
+	Install bandit into the project venv. Bandit scans Python source for
+	common security vulnerabilities - hardcoded passwords, unsafe eval(),
+	SQL injection patterns, weak crypto.
 
 	Args:
-	    pip_bin:      Path to the venv pip executable.
+	    venv_python_bin: Path to the venv's python3 executable.
 	    project_path: The resolved Path to the project root directory.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	step("🔐", "Bandit (Security Scanner)")
-	info("Installing bandit into venv via pip (isolated)...")
-	_pip_install(pip_bin, ["bandit"])
+	info(f"Installing bandit into venv via {package_manager}...")
+	_install_packages(venv_python_bin, ["bandit"], package_manager)
 
 	# Write a pyproject.toml bandit config section - skips test files
 	# since test code intentionally uses patterns bandit would flag
@@ -1855,18 +1971,19 @@ def install_bandit(pip_bin: str, project_path: Path):
 				f.write(bandit_config)
 			success(f"Bandit config appended to {pyproject_path}")
 
-	verify_bandit(pip_bin)
+	verify_bandit(venv_python_bin)
 
 
-def verify_bandit(pip_bin: str):
+def verify_bandit(venv_python_bin: str):
 	"""
 	Confirm bandit is installed in the venv and runnable.
 	Only called if the user opted in during the installation menu.
 
 	Args:
-	    pip_bin: Path to the venv pip, used to locate the bandit binary.
+	    venv_python_bin: Path to the venv's python3 executable, used to
+	        locate the bandit binary.
 	"""
-	bandit_bin = str(Path(pip_bin).parent / "bandit")
+	bandit_bin = str(Path(venv_python_bin).parent / "bandit")
 	if not Path(bandit_bin).exists():
 		fatal(f"Bandit verification failed - binary not found at {bandit_bin}")
 
@@ -2011,19 +2128,26 @@ def verify_python(python_bin: str | None = None):
 	)
 
 
-def verify_venv(project_path: Path):
+def verify_venv(project_path: Path, package_manager: str = PACKAGE_MANAGER_PIP):
 	"""
 	Confirm the virtual environment was created correctly by checking that
-	the python3 and pip executables exist, are runnable, and that the venv
-	Python reports the pinned major.minor version.
+	python3 exists and is runnable, that the venv Python reports the pinned
+	major.minor version, and (pip only) that pip itself is present.
+
+	A uv-created venv has no pip binary by design — uv installs packages
+	directly against the venv's interpreter — so the pip-existence check is
+	skipped when package_manager is uv.
 
 	Args:
 	    project_path: The resolved Path to the project root directory.
+	    package_manager: PACKAGE_MANAGER_PIP or PACKAGE_MANAGER_UV.
 	"""
 	venv_python = project_path / ".venv" / "bin" / "python3"
-	venv_pip = project_path / ".venv" / "bin" / "pip"
+	binaries_to_check = [venv_python]
+	if package_manager == PACKAGE_MANAGER_PIP:
+		binaries_to_check.append(project_path / ".venv" / "bin" / "pip")
 
-	for binary in [venv_python, venv_pip]:
+	for binary in binaries_to_check:
 		if not binary.exists():
 			fatal(f"Venv verification failed - {binary} does not exist.")
 		if not os.access(binary, os.X_OK):
@@ -2380,6 +2504,9 @@ class InstallChoices:
 	"""
 
 	def __init__(self):
+		# Package manager for venv creation + installs - defaults to pip for
+		# backward compatibility; overwritten by the package manager page.
+		self.package_manager = PACKAGE_MANAGER_PIP
 		# Optional tools - default False until user opts in
 		self.eslint = False  # Frontend linter for JS/TS files
 		self.prettier = False  # Frontend formatter for JS/TS/HTML/CSS/MD
@@ -2508,6 +2635,35 @@ def show_installation_menu() -> InstallChoices:
 			f"  {C.YELLOW}★{C.RESET} {C.BOLD}{name:<22}{C.RESET} {C.YELLOW}{category:<26}{C.RESET} {why}"
 		)
 
+	press_any_key("  Press any key to choose a package manager...")
+
+	# Clear screen before the package manager section for a fresh view
+	print("\033[2J\033[H", end="")
+	banner()
+
+	# ── Prompt for package manager (pip vs uv) ────────────────────────────────
+	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+	print(f"  {C.BOLD}  PACKAGE MANAGER  (choose one){C.RESET}")
+	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+	print(f"  {C.MAGENTA}pip{C.RESET}  - The classic, always-available Python installer.")
+	print(f"  {C.MAGENTA}uv{C.RESET}   - A much faster Rust-based drop-in replacement for")
+	print("        pip and venv, installed via Homebrew if not already present.")
+	print()
+
+	while True:
+		answer = (
+			input(f"  {C.BOLD}{C.MAGENTA}>>> Use uv or pip? (uv/pip): {C.RESET}").strip().lower()
+		)
+		if answer in ("uv", "u"):
+			choices.package_manager = PACKAGE_MANAGER_UV
+			break
+		if answer in ("pip", "p"):
+			choices.package_manager = PACKAGE_MANAGER_PIP
+			break
+		warning(f"  '{answer}' is not a valid choice - enter 'uv' or 'pip'.")
+
+	success(f"  Using {choices.package_manager} for the virtual environment and installs.")
+
 	press_any_key("  Press any key to continue to optional tools...")
 
 	# Clear screen before the optional tools section for a fresh view
@@ -2553,6 +2709,10 @@ def show_installation_menu() -> InstallChoices:
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
 	print(f"  {C.BOLD}  Your installation plan:{C.RESET}")
 	print(f"  {C.BOLD}{'─' * 58}{C.RESET}")
+
+	print(
+		f"  {C.GREEN}✔{C.RESET}  Package manager: {choices.package_manager} {C.BLUE}(your choice){C.RESET}"
+	)
 
 	for name, required, category, _, _ in TOOL_MANIFEST:
 		if required:
@@ -2609,22 +2769,26 @@ def do_fresh_install():
 	ensure_git()
 	verify_git()
 
+	# ── Package manager (uv only - pip ships with Python) ────────────────────
+	if choices.package_manager == PACKAGE_MANAGER_UV:
+		ensure_uv()
+
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
 	verify_python(python_bin)
-	pip_bin = create_venv(project_path, python_bin)
-	verify_venv(project_path)
+	venv_python_bin = create_venv(project_path, python_bin, choices.package_manager)
+	verify_venv(project_path, choices.package_manager)
 
 	# Add watchdog to install list if user opted in
 	if choices.watchdog:
 		info("Adding watchdog to install list (user opted in)...")
 		BASE_PACKAGES.append("watchdog")
 
-	install_base_packages(pip_bin, project_path)
+	install_base_packages(venv_python_bin, project_path, choices.package_manager)
 	verify_packages(project_path)
 
 	# ── detect-secrets ────────────────────────────────────────────────────────
-	detect_secrets_bin = install_detect_secrets(pip_bin)
+	detect_secrets_bin = install_detect_secrets(venv_python_bin, choices.package_manager)
 	verify_detect_secrets(detect_secrets_bin)
 	init_secrets_baseline(project_path, detect_secrets_bin)
 	verify_secrets_baseline(project_path)
@@ -2665,7 +2829,7 @@ def do_fresh_install():
 
 	# ── Bandit (optional) ────────────────────────────────────────────────────
 	if choices.bandit:
-		install_bandit(pip_bin, project_path)
+		install_bandit(venv_python_bin, project_path, choices.package_manager)
 
 	# ── Prettier (optional) ───────────────────────────────────────────────────
 	if choices.prettier:
@@ -2764,9 +2928,18 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 
 	info(f"Repairing project at: {C.YELLOW}{target_path}{C.RESET}")
 
+	# Detect which package manager originally created this venv BEFORE any
+	# --rebuild-venv deletion below wipes the evidence (pyvenv.cfg). Repair
+	# mode is non-interactive, so this is the only way to know whether to
+	# re-target uv or pip without re-prompting.
+	venv_path = target_path / ".venv"
+	package_manager = _detect_venv_package_manager(venv_path)
+	info(f"Detected package manager: {C.YELLOW}{package_manager}{C.RESET}")
+	if package_manager == PACKAGE_MANAGER_UV:
+		ensure_uv()
+
 	# Optional venv nuke — useful when the existing venv is wrong-version or
 	# obviously broken and the user wants a clean rebuild.
-	venv_path = target_path / ".venv"
 	if rebuild_venv and venv_path.exists():
 		warning(f"--rebuild-venv specified - removing {venv_path}")
 		shutil.rmtree(venv_path)
@@ -2775,15 +2948,14 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	# ── Python + venv + packages ──────────────────────────────────────────────
 	python_bin = ensure_python()
 	verify_python(python_bin)
-	pip_bin = create_venv(target_path, python_bin)
-	verify_venv(target_path)
+	venv_python_bin = create_venv(target_path, python_bin, package_manager)
+	verify_venv(target_path, package_manager)
 
 	# Detect whether watchdog was previously installed so we re-verify it.
 	# We check by looking inside the venv's site-packages rather than relying
 	# on a config file, since the user may have installed it manually.
-	venv_python = _venv_python_from_pip_bin(pip_bin)
 	watchdog_check = subprocess.run(
-		[venv_python, "-c", "import watchdog"],
+		[venv_python_bin, "-c", "import watchdog"],
 		capture_output=True,
 		check=False,
 	)
@@ -2791,7 +2963,7 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 		info("Detected existing watchdog install - including in re-verification.")
 		BASE_PACKAGES.append("watchdog")
 
-	install_base_packages(pip_bin, target_path)
+	install_base_packages(venv_python_bin, target_path, package_manager)
 	verify_packages(target_path)
 
 	# ── Regenerate the pre-commit hook ────────────────────────────────────────
@@ -2801,7 +2973,7 @@ def do_repair(target_path: Path, rebuild_venv: bool = False):
 	# regenerating it puts the quality gate back in working order. The hook
 	# content is path-derived so it's safe to overwrite even if the user
 	# manually customized it; we warn first.
-	detect_secrets_bin = _resolve_detect_secrets_bin(pip_bin)
+	detect_secrets_bin = _resolve_detect_secrets_bin(venv_python_bin)
 	hook_path = target_path / ".git" / "hooks" / "pre-commit"
 	if hook_path.exists():
 		info(f"Overwriting existing hook: {hook_path}")

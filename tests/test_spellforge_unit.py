@@ -37,6 +37,37 @@ class TestInstallChoices:
 		assert not choices.watchdog
 		assert not choices.bandit
 
+	def test_package_manager_defaults_to_pip(self):
+		"""Non-interactive callers (e.g. repair mode) must get pip unless told otherwise."""
+		choices = spellforge.InstallChoices()
+		assert choices.package_manager == spellforge.PACKAGE_MANAGER_PIP
+
+
+# =============================================================================
+# _detect_venv_package_manager
+# =============================================================================
+
+
+class TestDetectVenvPackageManager:
+	"""Repair mode reads pyvenv.cfg to re-target the venv's original package manager."""
+
+	def test_missing_pyvenv_cfg_defaults_to_pip(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_PIP
+
+	def test_stdlib_venv_pyvenv_cfg_is_pip(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		(venv_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.13.0\n")
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_PIP
+
+	def test_uv_pyvenv_cfg_is_detected(self, tmp_path):
+		venv_path = tmp_path / ".venv"
+		venv_path.mkdir()
+		(venv_path / "pyvenv.cfg").write_text("home = /usr/bin\nuv = 0.5.0\nversion = 3.13.0\n")
+		assert spellforge._detect_venv_package_manager(venv_path) == spellforge.PACKAGE_MANAGER_UV
+
 
 # =============================================================================
 # _isolated_pip_env

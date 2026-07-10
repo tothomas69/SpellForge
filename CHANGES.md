@@ -5,30 +5,30 @@ fix the silent-failure mode that produced your `⚠ Ruff not found at
 .../.venv/bin/ruff` error and to pin projects to Python 3.13.x instead of
 inheriting whatever `python3` happened to resolve to.
 
-## 0. Fold the PRD into as-built's Design Intent section (latest pass)
+## 0. pip / uv package manager choice (latest pass)
 
-`docs/prd.md` is gone. It was a separate, mostly-static requirements doc that
-drifted out of sync with the code, sitting next to `as-built-project-guide.md`
-— a doc CLAUDE.md already requires updating on every structural commit. Two
-docs meant two places to keep current, and only one of them was actually
-enforced to stay current.
+The installation menu now has a dedicated page where the user picks `pip`
+(classic, always available once Python is) or `uv` (a much faster Rust-based
+drop-in). The choice drives venv creation and every subsequent package
+install:
 
-- `write_agent_docs()` now writes a single file:
-  `docs/as-built-project-guide.md`, with a new `## Design Intent` section
-  (`### What We Are Building`, `### Problem We Are Solving`, `### Goals`,
-  `### Features`, `### Technical Requirements`, `### Out of Scope`) ahead of
-  the existing `## Directory Structure` / `## Systems` / `## Architecture
-Decisions` sections. The PRD's own `## Definition of Done` checklist was
-  dropped as a duplicate of CLAUDE.md's more detailed one.
-- `prompt_prd()` is now `prompt_design_intent()`. Instead of rewriting a
-  whole `prd.md` from a template, it edits the as-built file in place —
-  replacing the `_Describe what this project does in one sentence._`
-  placeholder under `### What We Are Building` with the user's description
-  — so the Directory Structure / Systems / Architecture Decisions sections
-  survive untouched.
-- `verify_agent_docs()`, `create_directory_structure()`, `write_claude_md()`
-  (drops the `@docs/prd.md` bullet), and `print_summary()` all updated to
-  match: one doc, not two.
+- `create_venv()` dispatches to `python -m venv` or `uv venv --python
+<python_bin>`, and now returns the venv's `python3` path (rather than a
+  `pip` path) since a uv-created venv has no `pip` binary by design.
+- `_pip_install()` was generalized into `_install_packages()`, which either
+  runs the existing isolated `python -m pip install` flow or shells out to
+  `uv pip install --python <venv_python>`.
+- `verify_venv()` skips the pip-existence check under uv, since uv manages
+  installs directly against the interpreter rather than through a pip binary
+  in the venv.
+- `ensure_uv()` installs uv via Homebrew if it's not already on PATH,
+  following the same fatal-with-manual-instructions pattern as
+  `ensure_python()` when Homebrew isn't available.
+- Repair mode (`--repair`) is non-interactive and has no `InstallChoices` to
+  read the original choice from, so `_detect_venv_package_manager()` reads
+  the existing venv's `pyvenv.cfg` for uv's `uv = <version>` marker line
+  (read _before_ any `--rebuild-venv` deletion) and re-targets the same
+  manager instead of silently defaulting back to pip.
 
 ## 1. Secret-scanning hook rewrite
 
